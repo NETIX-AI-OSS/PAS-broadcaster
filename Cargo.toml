@@ -1,0 +1,23 @@
+[package]
+name = "fas-broadcaster"
+version = "0.1.0"
+edition = "2021"
+description = "Native IGMP multicast RTP L16 audio broadcaster for station announcements"
+
+[dependencies]
+anyhow = "1.0"
+cpal = "0.15"
+crossbeam-channel = "0.5"
+directories = "5.0"
+get_if_addrs = "0.5"
+iced = { version = "0.12", features = ["tokio"] }
+rand = "0.8"
+rfd = "0.14"
+serde = { version = "1.0", features = ["derive"] }
+socket2 = "0.5"
+symphonia = { version = "0.5", features = ["mp3", "wav", "pcm"] }
+thiserror = "1.0"
+toml = "0.8"
+
+[dev-dependencies]
+tempfile = "3.10"
