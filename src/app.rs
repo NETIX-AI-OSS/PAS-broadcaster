@@ -358,7 +358,11 @@ struct ProfileOption {
 
 impl From<&DeviceProfile> for ProfileOption {
     fn from(profile: &DeviceProfile) -> Self {
-        let tag = if profile.builtin { "built-in" } else { "custom" };
+        let tag = if profile.builtin {
+            "built-in"
+        } else {
+            "custom"
+        };
         Self {
             id: profile.id.clone(),
             label: format!("{} ({tag})", profile.name),
@@ -434,8 +438,14 @@ impl ConverterEditor {
             format: settings.format.clone(),
             map: settings.map.clone(),
             output_suffix: settings.output_suffix.clone(),
-            highpass_hz: settings.highpass_hz.map(|hz| hz.to_string()).unwrap_or_default(),
-            lowpass_hz: settings.lowpass_hz.map(|hz| hz.to_string()).unwrap_or_default(),
+            highpass_hz: settings
+                .highpass_hz
+                .map(|hz| hz.to_string())
+                .unwrap_or_default(),
+            lowpass_hz: settings
+                .lowpass_hz
+                .map(|hz| hz.to_string())
+                .unwrap_or_default(),
             in_progress: false,
             last_converted_file: None,
         }
@@ -1703,11 +1713,9 @@ impl PasBroadcaster {
         labeled_control(
             "Target device profile",
             "align audio + converter to a hardware target",
-            pick_list(options, selected, |choice| {
-                Message::ApplyProfile(choice.id)
-            })
-            .padding(8)
-            .style(self.pick_list_style()),
+            pick_list(options, selected, |choice| Message::ApplyProfile(choice.id))
+                .padding(8)
+                .style(self.pick_list_style()),
             self.palette(),
         )
         .into()
@@ -1727,7 +1735,11 @@ impl PasBroadcaster {
             if is_active {
                 title.push_str("  (active)");
             }
-            let tag = if profile.builtin { "Built-in" } else { "Custom" };
+            let tag = if profile.builtin {
+                "Built-in"
+            } else {
+                "Custom"
+            };
             let detail = format!(
                 "{tag} · {} Hz / {}-bit / {} ch · payload {}",
                 profile.audio.sample_rate,
@@ -1796,10 +1808,15 @@ impl PasBroadcaster {
         .spacing(8);
 
         let mut content = column![
-            section_heading("Profiles", "Target hardware presets for re-encode + broadcast"),
+            section_heading(
+                "Profiles",
+                "Target hardware presets for re-encode + broadcast"
+            ),
             container(
                 column![
-                    text("Active profile").size(13).style(self.muted_text_style()),
+                    text("Active profile")
+                        .size(13)
+                        .style(self.muted_text_style()),
                     text(active_label).size(16).width(Length::Fill),
                 ]
                 .spacing(3)
@@ -1819,7 +1836,10 @@ impl PasBroadcaster {
                 .push(self.profile_editor_view());
         }
 
-        container(content).padding(16).style(self.panel_style()).into()
+        container(content)
+            .padding(16)
+            .style(self.panel_style())
+            .into()
     }
 
     fn profile_editor_view(&self) -> Element<'_, Message> {
@@ -2404,7 +2424,10 @@ impl PasBroadcaster {
             self.selected_profile = idx;
         }
         self.profile_editor.visible = false;
-        self.append_log(LogLevel::Info, format!("Saved device profile '{}'", profile.name));
+        self.append_log(
+            LogLevel::Info,
+            format!("Saved device profile '{}'", profile.name),
+        );
         self.save_config_with_status();
     }
 

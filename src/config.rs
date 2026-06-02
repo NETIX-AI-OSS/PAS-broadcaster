@@ -610,8 +610,10 @@ priority = "normal"
                 default_port: None,
             },
         };
-        let mut config = AppConfig::default();
-        config.profiles = vec![make(), make()];
+        let config = AppConfig {
+            profiles: vec![make(), make()],
+            ..AppConfig::default()
+        };
 
         assert!(validate_config(&config).is_err());
     }
