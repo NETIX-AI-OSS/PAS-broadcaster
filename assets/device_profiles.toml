@@ -1,0 +1,44 @@
+# Bundled target hardware profiles for PAS Broadcaster.
+#
+# These built-in profiles are compiled into the binary and re-merged with the
+# user's own profiles at every launch, so shipping an updated profile here
+# automatically reaches users who have not cloned that profile id. The
+# `builtin`/`source` markers are forced by the loader; values set here are
+# ignored. Edit this file to add or tune built-in device targets.
+
+[[profiles]]
+id = "ateis-btq-vm"
+name = "ATEIS BOUTIQUE BTQ-VM4/VM8"
+vendor = "ATEIS"
+model = "BOUTIQUE BTQ-VM4/VM8 250W/500W PA/VA"
+
+# Native DSP is 48 kHz / 24-bit; PA zones are mono line outputs.
+[profiles.audio]
+sample_rate = 48000
+channels = 1
+bit_depth = 24
+packet_duration_ms = 20
+
+# Recode files to 48 kHz / 24-bit WAV, band-limited to the internal amplifier's
+# 50 Hz - 18 kHz response so out-of-band energy is removed before broadcast.
+[profiles.converter]
+delay_ms = 0
+volume_db = -6.0
+fade_start_seconds = 0.0
+fade_duration_seconds = 0.0
+sample_rate = 48000
+channels = 1
+codec = "pcm_s24le"
+format = "wav"
+map = "0:a:0"
+output_suffix = "_BTQ_VM_48k24.wav"
+highpass_hz = 50
+lowpass_hz = 18000
+
+# Payload type 97 (dynamic) carries L24 PCM (RFC 3190). Confirm the value the
+# device expects against ATEIS protocol documentation before relying on live
+# streaming; it is user-editable per profile.
+[profiles.network]
+rtp_payload_type = 97
+default_multicast_ip = "239.10.10.20"
+default_port = 5004

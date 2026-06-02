@@ -6,6 +6,8 @@ use crate::config::{
 use crate::converter::{convert_audio, default_output_path, ConversionResult};
 use crate::log::{LogEvent, LogLevel};
 use crate::network::{ipv4_interfaces, NetworkInterface};
+use crate::profiles::{merge_builtins, DeviceProfile, NetworkDefaults, ProfileSource};
+use crate::rtp::default_payload_type;
 use crate::validation::{parse_admin_multicast, validate_port};
 use anyhow::Context;
 use crossbeam_channel::{unbounded, Receiver, Sender};
@@ -39,6 +41,9 @@ pub struct PasBroadcaster {
     status: String,
     active: Option<ActiveBroadcast>,
     editor: ChannelEditor,
+    merged_profiles: Vec<DeviceProfile>,
+    selected_profile: usize,
+    profile_editor: ProfileEditor,
     log_sender: Sender<LogEvent>,
     log_receiver: Receiver<LogEvent>,
     logs: VecDeque<LogEntry>,
@@ -99,6 +104,29 @@ pub enum Message {
     EditorEnabledChanged(bool),
     EditorPriorityChanged(ChannelPriority),
     SaveEditor,
+    SelectProfile(usize),
+    ApplyProfile(String),
+    CloneProfile,
+    NewProfile,
+    DeleteProfile,
+    EditProfile,
+    ProfileEditorNameChanged(String),
+    ProfileEditorVendorChanged(String),
+    ProfileEditorModelChanged(String),
+    ProfileEditorSampleRateChanged(String),
+    ProfileEditorChannelsChanged(String),
+    ProfileEditorBitDepthChanged(String),
+    ProfileEditorPacketMsChanged(String),
+    ProfileEditorPayloadTypeChanged(String),
+    ProfileEditorMcastChanged(String),
+    ProfileEditorPortChanged(String),
+    ProfileEditorHighpassChanged(String),
+    ProfileEditorLowpassChanged(String),
+    ProfileEditorCodecChanged(String),
+    ProfileEditorOutputSuffixChanged(String),
+    ProfileEditorApplyChannelDefaults(bool),
+    SaveProfileEditor,
+    CancelProfileEditor,
     ReloadConfig,
     SaveConfig,
     RefreshDevices,
@@ -111,6 +139,7 @@ pub enum Page {
     Broadcast,
     Channels,
     Converter,
+    Profiles,
     Settings,
     Logs,
 }
@@ -154,6 +183,8 @@ struct ConverterEditor {
     format: String,
     map: String,
     output_suffix: String,
+    highpass_hz: String,
+    lowpass_hz: String,
     in_progress: bool,
     last_converted_file: Option<PathBuf>,
 }
@@ -164,10 +195,181 @@ enum EditorMode {
     New,
 }
 
+/// String-backed editor for a [`DeviceProfile`], mirroring [`ChannelEditor`].
+/// Editing only ever produces *user* profiles; built-ins are cloned first.
+#[derive(Debug, Clone)]
+struct ProfileEditor {
+    visible: bool,
+    mode: EditorMode,
+    id: String,
+    name: String,
+    vendor: String,
+    model: String,
+    sample_rate: String,
+    channels: String,
+    bit_depth: String,
+    packet_ms: String,
+    payload_type: String,
+    multicast_ip: String,
+    port: String,
+    codec: String,
+    output_suffix: String,
+    highpass_hz: String,
+    lowpass_hz: String,
+    apply_channel_defaults: bool,
+    // Converter fields not surfaced in the editor (delay, volume, fades, map,
+    // format) are carried through unchanged from the profile being edited.
+    converter_base: ConverterSettings,
+}
+
+impl Default for ProfileEditor {
+    fn default() -> Self {
+        Self::new_profile()
+    }
+}
+
+impl ProfileEditor {
+    fn new_profile() -> Self {
+        let audio = crate::audio::AudioProfile::default();
+        let converter = ConverterSettings::default();
+        Self {
+            visible: false,
+            mode: EditorMode::New,
+            id: "my-device".to_string(),
+            name: "My Device".to_string(),
+            vendor: String::new(),
+            model: String::new(),
+            sample_rate: audio.sample_rate.to_string(),
+            channels: audio.channels.to_string(),
+            bit_depth: audio.bit_depth.to_string(),
+            packet_ms: audio.packet_duration_ms.to_string(),
+            payload_type: default_payload_type(audio.bit_depth).to_string(),
+            multicast_ip: String::new(),
+            port: String::new(),
+            codec: converter.codec.clone(),
+            output_suffix: converter.output_suffix.clone(),
+            highpass_hz: String::new(),
+            lowpass_hz: String::new(),
+            apply_channel_defaults: false,
+            converter_base: converter,
+        }
+    }
+
+    /// Editor populated from an existing profile. `mode` is `Existing(index)`
+    /// for a user profile (saved in place) or `New` when cloning a built-in.
+    fn from_profile(mode: EditorMode, profile: &DeviceProfile) -> Self {
+        Self {
+            visible: true,
+            mode,
+            id: profile.id.clone(),
+            name: profile.name.clone(),
+            vendor: profile.vendor.clone(),
+            model: profile.model.clone(),
+            sample_rate: profile.audio.sample_rate.to_string(),
+            channels: profile.audio.channels.to_string(),
+            bit_depth: profile.audio.bit_depth.to_string(),
+            packet_ms: profile.audio.packet_duration_ms.to_string(),
+            payload_type: profile.network.rtp_payload_type.to_string(),
+            multicast_ip: profile
+                .network
+                .default_multicast_ip
+                .map(|ip| ip.to_string())
+                .unwrap_or_default(),
+            port: profile
+                .network
+                .default_port
+                .map(|p| p.to_string())
+                .unwrap_or_default(),
+            codec: profile.converter.codec.clone(),
+            output_suffix: profile.converter.output_suffix.clone(),
+            highpass_hz: profile
+                .converter
+                .highpass_hz
+                .map(|hz| hz.to_string())
+                .unwrap_or_default(),
+            lowpass_hz: profile
+                .converter
+                .lowpass_hz
+                .map(|hz| hz.to_string())
+                .unwrap_or_default(),
+            apply_channel_defaults: false,
+            converter_base: profile.converter.clone(),
+        }
+    }
+
+    fn build_profile(&self) -> Result<DeviceProfile, String> {
+        let id = self.id.trim().to_string();
+        let name = self.name.trim().to_string();
+        let audio = crate::audio::AudioProfile {
+            sample_rate: parse_u32_field(&self.sample_rate, "profile sample rate")?,
+            channels: parse_u16_field(&self.channels, "profile channels")?,
+            bit_depth: parse_u16_field(&self.bit_depth, "profile bit depth")?,
+            packet_duration_ms: parse_u16_field(&self.packet_ms, "profile packet duration")?,
+        };
+
+        let multicast_ip = parse_optional_ip_field(&self.multicast_ip, "profile multicast IP")?;
+        let port = parse_optional_u16_field(&self.port, "profile port")?;
+        let network = NetworkDefaults {
+            rtp_payload_type: parse_u16_field(&self.payload_type, "profile payload type")? as u8,
+            default_multicast_ip: multicast_ip,
+            default_port: port,
+        };
+
+        // The converter mirrors the profile's audio rate/channels and carries
+        // the unedited base settings for everything else.
+        let converter = ConverterSettings {
+            sample_rate: audio.sample_rate,
+            channels: audio.channels,
+            codec: self.codec.trim().to_string(),
+            output_suffix: self.output_suffix.trim().to_string(),
+            highpass_hz: parse_optional_u32_field(&self.highpass_hz, "profile highpass")?,
+            lowpass_hz: parse_optional_u32_field(&self.lowpass_hz, "profile lowpass")?,
+            ..self.converter_base.clone()
+        };
+
+        let profile = DeviceProfile {
+            id,
+            name,
+            vendor: self.vendor.trim().to_string(),
+            model: self.model.trim().to_string(),
+            builtin: false,
+            source: ProfileSource::User,
+            audio,
+            converter,
+            network,
+        };
+        profile.validate()?;
+        Ok(profile)
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum BroadcastTab {
     Realtime,
     FileUpload,
+}
+
+/// Display wrapper so device profiles can populate a `pick_list`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct ProfileOption {
+    id: String,
+    label: String,
+}
+
+impl From<&DeviceProfile> for ProfileOption {
+    fn from(profile: &DeviceProfile) -> Self {
+        let tag = if profile.builtin { "built-in" } else { "custom" };
+        Self {
+            id: profile.id.clone(),
+            label: format!("{} ({tag})", profile.name),
+        }
+    }
+}
+
+impl std::fmt::Display for ProfileOption {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.label)
+    }
 }
 
 impl ChannelEditor {
@@ -232,6 +434,8 @@ impl ConverterEditor {
             format: settings.format.clone(),
             map: settings.map.clone(),
             output_suffix: settings.output_suffix.clone(),
+            highpass_hz: settings.highpass_hz.map(|hz| hz.to_string()).unwrap_or_default(),
+            lowpass_hz: settings.lowpass_hz.map(|hz| hz.to_string()).unwrap_or_default(),
             in_progress: false,
             last_converted_file: None,
         }
@@ -249,6 +453,8 @@ impl ConverterEditor {
             format: self.format.trim().to_string(),
             map: self.map.trim().to_string(),
             output_suffix: self.output_suffix.trim().to_string(),
+            highpass_hz: parse_optional_u32_field(&self.highpass_hz, "converter highpass")?,
+            lowpass_hz: parse_optional_u32_field(&self.lowpass_hz, "converter lowpass")?,
         };
         settings.validate()?;
         Ok(settings)
@@ -309,6 +515,7 @@ impl PasBroadcaster {
 
         let packet_duration_input = config.audio.packet_duration_ms.to_string();
         let converter = ConverterEditor::from_settings(&config.converter);
+        let merged_profiles = merge_builtins(&config.profiles);
         let (log_sender, log_receiver) = unbounded();
         let mut logs = VecDeque::new();
         logs.push_back(LogEntry {
@@ -332,6 +539,9 @@ impl PasBroadcaster {
             status,
             active: None,
             editor,
+            merged_profiles,
+            selected_profile: 0,
+            profile_editor: ProfileEditor::new_profile(),
             log_sender,
             log_receiver,
             logs,
@@ -608,6 +818,38 @@ impl PasBroadcaster {
             Message::EditorEnabledChanged(value) => self.editor.enabled = value,
             Message::EditorPriorityChanged(value) => self.editor.priority = value,
             Message::SaveEditor => self.save_editor_channel(),
+            Message::SelectProfile(index) => {
+                if index < self.merged_profiles.len() {
+                    self.selected_profile = index;
+                }
+            }
+            Message::ApplyProfile(id) => self.apply_profile_by_id(&id),
+            Message::EditProfile => self.begin_edit_profile(),
+            Message::CloneProfile => self.begin_clone_profile(),
+            Message::NewProfile => {
+                self.profile_editor = ProfileEditor::new_profile();
+                self.profile_editor.visible = true;
+            }
+            Message::DeleteProfile => self.delete_selected_profile(),
+            Message::ProfileEditorNameChanged(v) => self.profile_editor.name = v,
+            Message::ProfileEditorVendorChanged(v) => self.profile_editor.vendor = v,
+            Message::ProfileEditorModelChanged(v) => self.profile_editor.model = v,
+            Message::ProfileEditorSampleRateChanged(v) => self.profile_editor.sample_rate = v,
+            Message::ProfileEditorChannelsChanged(v) => self.profile_editor.channels = v,
+            Message::ProfileEditorBitDepthChanged(v) => self.profile_editor.bit_depth = v,
+            Message::ProfileEditorPacketMsChanged(v) => self.profile_editor.packet_ms = v,
+            Message::ProfileEditorPayloadTypeChanged(v) => self.profile_editor.payload_type = v,
+            Message::ProfileEditorMcastChanged(v) => self.profile_editor.multicast_ip = v,
+            Message::ProfileEditorPortChanged(v) => self.profile_editor.port = v,
+            Message::ProfileEditorHighpassChanged(v) => self.profile_editor.highpass_hz = v,
+            Message::ProfileEditorLowpassChanged(v) => self.profile_editor.lowpass_hz = v,
+            Message::ProfileEditorCodecChanged(v) => self.profile_editor.codec = v,
+            Message::ProfileEditorOutputSuffixChanged(v) => self.profile_editor.output_suffix = v,
+            Message::ProfileEditorApplyChannelDefaults(v) => {
+                self.profile_editor.apply_channel_defaults = v
+            }
+            Message::SaveProfileEditor => self.save_profile_editor(),
+            Message::CancelProfileEditor => self.profile_editor.visible = false,
             Message::ReloadConfig => self.reload_config(),
             Message::SaveConfig => self.save_config_with_status(),
             Message::RefreshDevices => {
@@ -696,6 +938,7 @@ impl PasBroadcaster {
             self.nav_item(Page::Broadcast, "Broadcast", "Go live or play audio"),
             self.nav_item(Page::Channels, "Channels", "Targets and editor"),
             self.nav_item(Page::Converter, "Converter", "Prepare safe WAV files"),
+            self.nav_item(Page::Profiles, "Profiles", "Target hardware presets"),
             self.nav_item(Page::Settings, "Settings", "Network and audio"),
             self.nav_item(Page::Logs, "Logs", "Events and worker output"),
             rule::horizontal(1).style(self.rule_style()),
@@ -737,6 +980,7 @@ impl PasBroadcaster {
             Page::Broadcast => self.broadcast_page(),
             Page::Channels => self.channels_page(),
             Page::Converter => self.converter_page(),
+            Page::Profiles => self.profiles_page(),
             Page::Settings => self.settings_page(),
             Page::Logs => self.logs_page(),
         }
@@ -892,6 +1136,7 @@ impl PasBroadcaster {
             )
             .padding(12)
             .style(self.band_style()),
+            self.profile_selector(),
             row![
                 button("Realtime")
                     .width(Length::FillPortion(1))
@@ -919,6 +1164,7 @@ impl PasBroadcaster {
         container(
             column![
                 section_heading("Converter", "Prepare PAS-safe broadcast audio"),
+                self.profile_selector(),
                 self.converter_view(),
             ]
             .spacing(12),
@@ -1440,6 +1686,318 @@ impl PasBroadcaster {
         .into()
     }
 
+    /// A `pick_list` for choosing the active device profile, reused on the
+    /// Broadcast and Converter pages.
+    fn profile_selector(&self) -> Element<'_, Message> {
+        let options: Vec<ProfileOption> = self
+            .merged_profiles
+            .iter()
+            .map(ProfileOption::from)
+            .collect();
+        let selected = self
+            .config
+            .active_profile_id
+            .as_deref()
+            .and_then(|id| options.iter().find(|o| o.id == id).cloned());
+
+        labeled_control(
+            "Target device profile",
+            "align audio + converter to a hardware target",
+            pick_list(options, selected, |choice| {
+                Message::ApplyProfile(choice.id)
+            })
+            .padding(8)
+            .style(self.pick_list_style()),
+            self.palette(),
+        )
+        .into()
+    }
+
+    fn profiles_page(&self) -> Element<'_, Message> {
+        let active_label = self
+            .active_device_profile()
+            .map(|p| p.name.clone())
+            .unwrap_or_else(|| "None (using manual audio/converter settings)".to_string());
+
+        let mut list = column![].spacing(8);
+        for (index, profile) in self.merged_profiles.iter().enumerate() {
+            let selected = index == self.selected_profile;
+            let is_active = self.config.active_profile_id.as_deref() == Some(profile.id.as_str());
+            let mut title = profile.name.clone();
+            if is_active {
+                title.push_str("  (active)");
+            }
+            let tag = if profile.builtin { "Built-in" } else { "Custom" };
+            let detail = format!(
+                "{tag} · {} Hz / {}-bit / {} ch · payload {}",
+                profile.audio.sample_rate,
+                profile.audio.bit_depth,
+                profile.audio.channels,
+                profile.network.rtp_payload_type
+            );
+            list = list.push(
+                button(
+                    column![
+                        text(title)
+                            .size(15)
+                            .align_x(Horizontal::Left)
+                            .width(Length::Fill),
+                        text(detail)
+                            .size(12)
+                            .align_x(Horizontal::Left)
+                            .width(Length::Fill),
+                    ]
+                    .spacing(3),
+                )
+                .width(Length::Fill)
+                .padding(10)
+                .style(if selected {
+                    self.button_style(Tone::Primary)
+                } else {
+                    self.button_style(Tone::Secondary)
+                })
+                .on_press(Message::SelectProfile(index)),
+            );
+        }
+
+        let selected_profile = self.merged_profiles.get(self.selected_profile);
+        let is_builtin = selected_profile.map(|p| p.builtin).unwrap_or(true);
+
+        let mut apply_button = button("Apply")
+            .padding([8, 12])
+            .style(self.button_style(Tone::Primary));
+        if let Some(profile) = selected_profile {
+            apply_button = apply_button.on_press(Message::ApplyProfile(profile.id.clone()));
+        }
+        let mut edit_button = button("Edit")
+            .padding([8, 12])
+            .style(self.button_style(Tone::Secondary));
+        let mut delete_button = button("Delete")
+            .padding([8, 12])
+            .style(self.button_style(Tone::Destructive));
+        if !is_builtin {
+            edit_button = edit_button.on_press(Message::EditProfile);
+            delete_button = delete_button.on_press(Message::DeleteProfile);
+        }
+
+        let actions = row![
+            apply_button,
+            edit_button,
+            button("Clone")
+                .padding([8, 12])
+                .style(self.button_style(Tone::Secondary))
+                .on_press(Message::CloneProfile),
+            button("New")
+                .padding([8, 12])
+                .style(self.button_style(Tone::Positive))
+                .on_press(Message::NewProfile),
+            delete_button,
+        ]
+        .spacing(8);
+
+        let mut content = column![
+            section_heading("Profiles", "Target hardware presets for re-encode + broadcast"),
+            container(
+                column![
+                    text("Active profile").size(13).style(self.muted_text_style()),
+                    text(active_label).size(16).width(Length::Fill),
+                ]
+                .spacing(3)
+            )
+            .padding(12)
+            .style(self.band_style()),
+            self.profile_selector(),
+            rule::horizontal(1).style(self.rule_style()),
+            list,
+            actions,
+        ]
+        .spacing(12);
+
+        if self.profile_editor.visible {
+            content = content
+                .push(rule::horizontal(1).style(self.rule_style()))
+                .push(self.profile_editor_view());
+        }
+
+        container(content).padding(16).style(self.panel_style()).into()
+    }
+
+    fn profile_editor_view(&self) -> Element<'_, Message> {
+        let editor = &self.profile_editor;
+        let title = match editor.mode {
+            EditorMode::Existing(_) => "Edit Profile",
+            EditorMode::New => "New Profile",
+        };
+
+        column![
+            text(title).size(18),
+            text(format!("id: {}", editor.id))
+                .size(12)
+                .style(self.muted_text_style()),
+            row![
+                labeled_control(
+                    "Name",
+                    "shown in the profile list",
+                    text_input("My Device", &editor.name)
+                        .padding(8)
+                        .style(self.input_style())
+                        .on_input(Message::ProfileEditorNameChanged),
+                    self.palette(),
+                )
+                .width(Length::FillPortion(2)),
+                labeled_control(
+                    "Vendor",
+                    "manufacturer",
+                    text_input("ATEIS", &editor.vendor)
+                        .padding(8)
+                        .style(self.input_style())
+                        .on_input(Message::ProfileEditorVendorChanged),
+                    self.palette(),
+                )
+                .width(Length::FillPortion(1)),
+                labeled_control(
+                    "Model",
+                    "device model",
+                    text_input("BTQ-VM", &editor.model)
+                        .padding(8)
+                        .style(self.input_style())
+                        .on_input(Message::ProfileEditorModelChanged),
+                    self.palette(),
+                )
+                .width(Length::FillPortion(1)),
+            ]
+            .spacing(12),
+            row![
+                labeled_control(
+                    "Sample rate (Hz)",
+                    "8000-48000",
+                    text_input("48000", &editor.sample_rate)
+                        .padding(8)
+                        .style(self.input_style())
+                        .on_input(Message::ProfileEditorSampleRateChanged),
+                    self.palette(),
+                ),
+                labeled_control(
+                    "Channels",
+                    "1 or 2",
+                    text_input("1", &editor.channels)
+                        .padding(8)
+                        .style(self.input_style())
+                        .on_input(Message::ProfileEditorChannelsChanged),
+                    self.palette(),
+                ),
+                labeled_control(
+                    "Bit depth",
+                    "16 or 24",
+                    text_input("24", &editor.bit_depth)
+                        .padding(8)
+                        .style(self.input_style())
+                        .on_input(Message::ProfileEditorBitDepthChanged),
+                    self.palette(),
+                ),
+                labeled_control(
+                    "Packet (ms)",
+                    "10-100",
+                    text_input("20", &editor.packet_ms)
+                        .padding(8)
+                        .style(self.input_style())
+                        .on_input(Message::ProfileEditorPacketMsChanged),
+                    self.palette(),
+                ),
+            ]
+            .spacing(12),
+            row![
+                labeled_control(
+                    "RTP payload type",
+                    "dynamic 96-127 (96=L16, 97=L24)",
+                    text_input("97", &editor.payload_type)
+                        .padding(8)
+                        .style(self.input_style())
+                        .on_input(Message::ProfileEditorPayloadTypeChanged),
+                    self.palette(),
+                ),
+                labeled_control(
+                    "Default multicast IP",
+                    "optional",
+                    text_input("239.10.10.20", &editor.multicast_ip)
+                        .padding(8)
+                        .style(self.input_style())
+                        .on_input(Message::ProfileEditorMcastChanged),
+                    self.palette(),
+                ),
+                labeled_control(
+                    "Default port",
+                    "optional",
+                    text_input("5004", &editor.port)
+                        .padding(8)
+                        .style(self.input_style())
+                        .on_input(Message::ProfileEditorPortChanged),
+                    self.palette(),
+                ),
+            ]
+            .spacing(12),
+            row![
+                labeled_control(
+                    "Converter codec",
+                    "e.g. pcm_s24le, pcm_s16le",
+                    text_input("pcm_s24le", &editor.codec)
+                        .padding(8)
+                        .style(self.input_style())
+                        .on_input(Message::ProfileEditorCodecChanged),
+                    self.palette(),
+                ),
+                labeled_control(
+                    "Output suffix",
+                    "appended to converted file name",
+                    text_input("_BTQ_VM_48k24.wav", &editor.output_suffix)
+                        .padding(8)
+                        .style(self.input_style())
+                        .on_input(Message::ProfileEditorOutputSuffixChanged),
+                    self.palette(),
+                ),
+            ]
+            .spacing(12),
+            row![
+                labeled_control(
+                    "Highpass (Hz)",
+                    "blank = off",
+                    text_input("50", &editor.highpass_hz)
+                        .padding(8)
+                        .style(self.input_style())
+                        .on_input(Message::ProfileEditorHighpassChanged),
+                    self.palette(),
+                ),
+                labeled_control(
+                    "Lowpass (Hz)",
+                    "blank = off",
+                    text_input("18000", &editor.lowpass_hz)
+                        .padding(8)
+                        .style(self.input_style())
+                        .on_input(Message::ProfileEditorLowpassChanged),
+                    self.palette(),
+                ),
+            ]
+            .spacing(12),
+            checkbox(editor.apply_channel_defaults)
+                .label("Apply device multicast/port to the selected channel when applying")
+                .style(self.checkbox_style())
+                .on_toggle(Message::ProfileEditorApplyChannelDefaults),
+            row![
+                button("Save Profile")
+                    .padding([8, 12])
+                    .style(self.button_style(Tone::Positive))
+                    .on_press(Message::SaveProfileEditor),
+                button("Cancel")
+                    .padding([8, 12])
+                    .style(self.button_style(Tone::Secondary))
+                    .on_press(Message::CancelProfileEditor),
+            ]
+            .spacing(8),
+        ]
+        .spacing(8)
+        .into()
+    }
+
     fn status_footer(&self) -> Container<'_, Message> {
         container(
             column![
@@ -1568,6 +2126,20 @@ impl PasBroadcaster {
         self.start_microphone_broadcast();
     }
 
+    /// The currently applied device profile, looked up in the merged list.
+    fn active_device_profile(&self) -> Option<&DeviceProfile> {
+        let id = self.config.active_profile_id.as_deref()?;
+        self.merged_profiles.iter().find(|p| p.id == id)
+    }
+
+    /// RTP payload type for the current broadcast: the active profile's value
+    /// if a profile is applied, otherwise the default for the audio bit depth.
+    fn resolve_payload_type(&self) -> u8 {
+        self.active_device_profile()
+            .map(|p| p.network.rtp_payload_type)
+            .unwrap_or_else(|| default_payload_type(self.config.audio.bit_depth))
+    }
+
     fn start_selected(&mut self, source: BroadcastSource, source_label: &str) {
         let Some(channel) = self.selected_channel().cloned() else {
             self.set_status_with_level(LogLevel::Warning, "No channel selected");
@@ -1595,9 +2167,11 @@ impl PasBroadcaster {
             self.stop_broadcast("Previous broadcast preempted");
         }
         let description = format!("{} via {source_label}", channel.name);
+        let payload_type = self.resolve_payload_type();
         let handle = start_broadcast(
             channel.clone(),
             self.config.audio,
+            payload_type,
             self.config.selected_interface,
             source,
             self.log_sender.clone(),
@@ -1668,12 +2242,181 @@ impl PasBroadcaster {
         }
     }
 
+    fn refresh_profiles(&mut self) {
+        self.merged_profiles = merge_builtins(&self.config.profiles);
+    }
+
+    /// A profile id not already used by any built-in or user profile.
+    fn unique_profile_id(&self, base: &str) -> String {
+        let exists = |id: &str| self.merged_profiles.iter().any(|p| p.id == id);
+        if !exists(base) {
+            return base.to_string();
+        }
+        let mut n = 2;
+        loop {
+            let candidate = format!("{base}-{n}");
+            if !exists(&candidate) {
+                return candidate;
+            }
+            n += 1;
+        }
+    }
+
+    fn apply_profile_by_id(&mut self, id: &str) {
+        let Some(profile) = self.merged_profiles.iter().find(|p| p.id == id).cloned() else {
+            self.set_status_with_level(LogLevel::Warning, format!("Profile '{id}' not found"));
+            return;
+        };
+
+        self.config.apply_profile(&profile);
+
+        // Optionally align the selected channel's group/port to the device.
+        if self.profile_editor.apply_channel_defaults {
+            if let Some(channel) = self.config.channels.get_mut(self.selected_channel) {
+                if let Some(ip) = profile.network.default_multicast_ip {
+                    channel.multicast_ip = ip;
+                }
+                if let Some(port) = profile.network.default_port {
+                    channel.port = port;
+                }
+            }
+        }
+
+        // Rebuild dependent editors from the freshly applied config.
+        self.packet_duration_input = self.config.audio.packet_duration_ms.to_string();
+        self.converter = ConverterEditor::from_settings(&self.config.converter);
+        if let Some(channel) = self.config.channels.get(self.selected_channel) {
+            self.editor = ChannelEditor::from_channel(self.selected_channel, channel);
+        }
+
+        self.append_log(
+            LogLevel::Info,
+            format!(
+                "Applied device profile '{}' ({} Hz / {}-bit, payload type {})",
+                profile.name,
+                profile.audio.sample_rate,
+                profile.audio.bit_depth,
+                profile.network.rtp_payload_type
+            ),
+        );
+        self.save_config_with_status();
+    }
+
+    fn begin_edit_profile(&mut self) {
+        let Some(profile) = self.merged_profiles.get(self.selected_profile).cloned() else {
+            return;
+        };
+        if profile.builtin {
+            self.set_status_with_level(
+                LogLevel::Warning,
+                "Built-in profiles are read-only — use Clone to customize",
+            );
+            return;
+        }
+        let mode = self
+            .config
+            .profiles
+            .iter()
+            .position(|p| p.id == profile.id)
+            .map(EditorMode::Existing)
+            .unwrap_or(EditorMode::New);
+        self.profile_editor = ProfileEditor::from_profile(mode, &profile);
+    }
+
+    fn begin_clone_profile(&mut self) {
+        let Some(profile) = self.merged_profiles.get(self.selected_profile).cloned() else {
+            return;
+        };
+        let new_id = self.unique_profile_id(&format!("{}-copy", profile.id));
+        let clone = profile.clone_as_user(&new_id, &format!("{} (Copy)", profile.name));
+        self.profile_editor = ProfileEditor::from_profile(EditorMode::New, &clone);
+    }
+
+    fn delete_selected_profile(&mut self) {
+        let Some(profile) = self.merged_profiles.get(self.selected_profile).cloned() else {
+            return;
+        };
+        if profile.builtin {
+            self.set_status_with_level(LogLevel::Warning, "Built-in profiles cannot be deleted");
+            return;
+        }
+        self.config.profiles.retain(|p| p.id != profile.id);
+        if self.config.active_profile_id.as_deref() == Some(profile.id.as_str()) {
+            self.config.active_profile_id = None;
+        }
+        self.refresh_profiles();
+        self.selected_profile = self
+            .selected_profile
+            .min(self.merged_profiles.len().saturating_sub(1));
+        self.profile_editor.visible = false;
+        self.save_config_with_status();
+        self.set_status(format!("Deleted profile '{}'", profile.name));
+    }
+
+    fn save_profile_editor(&mut self) {
+        let profile = match self.profile_editor.build_profile() {
+            Ok(profile) => profile,
+            Err(error) => {
+                self.set_status_with_level(
+                    LogLevel::Warning,
+                    format!("Cannot save profile: {error}"),
+                );
+                return;
+            }
+        };
+
+        match self.profile_editor.mode {
+            EditorMode::Existing(index) if index < self.config.profiles.len() => {
+                // In-place update; the id may have changed, so guard against
+                // colliding with a *different* existing profile.
+                if self
+                    .config
+                    .profiles
+                    .iter()
+                    .enumerate()
+                    .any(|(i, p)| i != index && p.id == profile.id)
+                {
+                    self.set_status_with_level(
+                        LogLevel::Warning,
+                        format!("A profile with id '{}' already exists", profile.id),
+                    );
+                    return;
+                }
+                self.config.profiles[index] = profile.clone();
+            }
+            _ => {
+                if self.merged_profiles.iter().any(|p| p.id == profile.id) {
+                    self.set_status_with_level(
+                        LogLevel::Warning,
+                        format!(
+                            "A profile with id '{}' already exists — choose a unique id",
+                            profile.id
+                        ),
+                    );
+                    return;
+                }
+                self.config.profiles.push(profile.clone());
+            }
+        }
+
+        self.refresh_profiles();
+        if let Some(idx) = self.merged_profiles.iter().position(|p| p.id == profile.id) {
+            self.selected_profile = idx;
+        }
+        self.profile_editor.visible = false;
+        self.append_log(LogLevel::Info, format!("Saved device profile '{}'", profile.name));
+        self.save_config_with_status();
+    }
+
     fn reload_config(&mut self) {
         match config::load_from_path(&self.config_path) {
             Ok(config) => {
                 self.config = config;
                 self.packet_duration_input = self.config.audio.packet_duration_ms.to_string();
                 self.converter = ConverterEditor::from_settings(&self.config.converter);
+                self.refresh_profiles();
+                self.selected_profile = 0;
+                self.profile_editor.visible = false;
                 self.selected_channel = 0;
                 if let Some(channel) = self.config.channels.first() {
                     self.editor = ChannelEditor::from_channel(0, channel);
@@ -2446,6 +3189,40 @@ fn parse_f32_field(value: &str, label: &str) -> Result<f32, String> {
         .trim()
         .parse()
         .map_err(|_| format!("{label} must be a number"))
+}
+
+/// Parse an optional whole-number field: blank means "disabled" (`None`).
+fn parse_optional_u32_field(value: &str, label: &str) -> Result<Option<u32>, String> {
+    let trimmed = value.trim();
+    if trimmed.is_empty() {
+        return Ok(None);
+    }
+    trimmed
+        .parse()
+        .map(Some)
+        .map_err(|_| format!("{label} must be a whole number or blank"))
+}
+
+fn parse_optional_u16_field(value: &str, label: &str) -> Result<Option<u16>, String> {
+    let trimmed = value.trim();
+    if trimmed.is_empty() {
+        return Ok(None);
+    }
+    trimmed
+        .parse()
+        .map(Some)
+        .map_err(|_| format!("{label} must be a whole number or blank"))
+}
+
+fn parse_optional_ip_field(value: &str, label: &str) -> Result<Option<Ipv4Addr>, String> {
+    let trimmed = value.trim();
+    if trimmed.is_empty() {
+        return Ok(None);
+    }
+    trimmed
+        .parse()
+        .map(Some)
+        .map_err(|_| format!("{label} must be a valid IPv4 address or blank"))
 }
 
 fn format_tunable(value: f32) -> String {

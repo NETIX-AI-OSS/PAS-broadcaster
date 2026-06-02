@@ -59,6 +59,7 @@ impl Drop for BroadcastHandle {
 pub fn start_broadcast(
     channel: BroadcastChannel,
     profile: AudioProfile,
+    payload_type: u8,
     interface: Option<Ipv4Addr>,
     source: BroadcastSource,
     log_sender: Sender<LogEvent>,
@@ -79,6 +80,7 @@ pub fn start_broadcast(
         if let Err(error) = run_broadcast(
             channel,
             profile,
+            payload_type,
             interface,
             source,
             stop_receiver,
@@ -108,6 +110,7 @@ pub fn start_broadcast(
 fn run_broadcast(
     channel: BroadcastChannel,
     profile: AudioProfile,
+    payload_type: u8,
     interface: Option<Ipv4Addr>,
     source: BroadcastSource,
     stop_receiver: Receiver<()>,
@@ -125,7 +128,7 @@ fn run_broadcast(
         )),
     );
     let sender = MulticastSender::new(channel.multicast_ip, channel.port, interface)?;
-    let mut packetizer = RtpPacketizer::new(profile);
+    let mut packetizer = RtpPacketizer::new(profile).with_payload_type(payload_type);
 
     match source {
         BroadcastSource::File(path) => {
@@ -200,7 +203,7 @@ fn run_broadcast(
 }
 
 fn send_samples(
-    samples: &[i16],
+    samples: &[f32],
     profile: AudioProfile,
     sender: &MulticastSender,
     packetizer: &mut RtpPacketizer,

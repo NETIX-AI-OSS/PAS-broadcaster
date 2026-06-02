@@ -1,13 +1,17 @@
 use crate::audio::AudioProfile;
+use crate::profiles::DeviceProfile;
 use crate::validation::{parse_admin_multicast, validate_port};
 use anyhow::{Context, Result};
 use directories::ProjectDirs;
 use serde::{Deserialize, Serialize};
+use std::collections::HashSet;
 use std::fs;
 use std::net::Ipv4Addr;
 use std::path::{Path, PathBuf};
 
 const CONFIG_FILE_NAME: &str = "config.toml";
+/// Latest on-disk config schema version.
+pub const CURRENT_CONFIG_VERSION: u32 = 3;
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct AppConfig {
@@ -19,6 +23,13 @@ pub struct AppConfig {
     #[serde(default)]
     pub converter: ConverterSettings,
     pub ui: UiPreferences,
+    /// User-created device profiles. Built-in profiles are never stored here;
+    /// they are merged in from the bundled asset at runtime.
+    #[serde(default)]
+    pub profiles: Vec<DeviceProfile>,
+    /// Id of the currently applied device profile, if any.
+    #[serde(default)]
+    pub active_profile_id: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -74,19 +85,46 @@ pub struct ConverterSettings {
     pub map: String,
     #[serde(default = "default_converter_output_suffix")]
     pub output_suffix: String,
+    #[serde(default = "default_converter_highpass_hz")]
+    pub highpass_hz: Option<u32>,
+    #[serde(default = "default_converter_lowpass_hz")]
+    pub lowpass_hz: Option<u32>,
 }
 
 impl Default for AppConfig {
     fn default() -> Self {
         Self {
-            version: 2,
+            version: CURRENT_CONFIG_VERSION,
             channels: default_channels(),
             selected_interface: None,
             input_device_name: None,
             audio: AudioProfile::default(),
             converter: ConverterSettings::default(),
             ui: UiPreferences::default(),
+            profiles: Vec::new(),
+            active_profile_id: None,
         }
+    }
+}
+
+impl AppConfig {
+    /// Upgrade an older config in place to [`CURRENT_CONFIG_VERSION`].
+    ///
+    /// New fields use serde defaults on read, so migration is mostly a version
+    /// stamp today; the `match` keeps room for future schema changes.
+    pub fn migrate(&mut self) {
+        match self.version {
+            v if v < 3 => self.version = CURRENT_CONFIG_VERSION,
+            _ => {}
+        }
+    }
+
+    /// Apply a device profile's audio and converter settings, recording it as
+    /// the active profile. Channel/network defaults are applied separately by
+    /// the UI, which knows the currently selected channel.
+    pub fn apply_profile(&mut self, profile: &DeviceProfile) {
+        profile.apply_to(&mut self.audio, &mut self.converter);
+        self.active_profile_id = Some(profile.id.clone());
     }
 }
 
@@ -103,6 +141,8 @@ impl Default for ConverterSettings {
             format: default_converter_format(),
             map: default_converter_map(),
             output_suffix: default_converter_output_suffix(),
+            highpass_hz: default_converter_highpass_hz(),
+            lowpass_hz: default_converter_lowpass_hz(),
         }
     }
 }
@@ -150,6 +190,21 @@ impl ConverterSettings {
         }
         if self.output_suffix.trim().is_empty() {
             return Err("converter output suffix cannot be empty".to_string());
+        }
+        if let Some(hz) = self.highpass_hz {
+            if !(20..=192_000).contains(&hz) {
+                return Err("converter highpass must be between 20 and 192000 Hz".to_string());
+            }
+        }
+        if let Some(hz) = self.lowpass_hz {
+            if !(20..=192_000).contains(&hz) {
+                return Err("converter lowpass must be between 20 and 192000 Hz".to_string());
+            }
+        }
+        if let (Some(high), Some(low)) = (self.highpass_hz, self.lowpass_hz) {
+            if high >= low {
+                return Err("converter highpass must be below lowpass".to_string());
+            }
         }
         Ok(())
     }
@@ -236,7 +291,13 @@ pub fn load_or_create() -> Result<(AppConfig, PathBuf)> {
     let path = config_path()?;
 
     if path.exists() {
-        return Ok((load_from_path(&path)?, path));
+        let config = load_from_path(&path)?;
+        // `load_from_path` migrates in memory; if the on-disk file predates the
+        // current schema, persist the upgrade so it sticks.
+        if on_disk_version(&path) < CURRENT_CONFIG_VERSION {
+            save_to_path(&config, &path)?;
+        }
+        return Ok((config, path));
     }
 
     let legacy_path = legacy_config_path()?;
@@ -251,11 +312,27 @@ pub fn load_or_create() -> Result<(AppConfig, PathBuf)> {
     Ok((config, path))
 }
 
+/// Best-effort read of just the `version` field of an on-disk config, used to
+/// decide whether a migration needs persisting. Returns 0 if it can't be read.
+fn on_disk_version(path: &Path) -> u32 {
+    #[derive(Deserialize)]
+    struct VersionOnly {
+        #[serde(default)]
+        version: u32,
+    }
+    fs::read_to_string(path)
+        .ok()
+        .and_then(|contents| toml::from_str::<VersionOnly>(&contents).ok())
+        .map(|parsed| parsed.version)
+        .unwrap_or(0)
+}
+
 pub fn load_from_path(path: &Path) -> Result<AppConfig> {
     let contents = fs::read_to_string(path)
         .with_context(|| format!("failed to read config file {}", path.display()))?;
-    let config: AppConfig = toml::from_str(&contents)
+    let mut config: AppConfig = toml::from_str(&contents)
         .with_context(|| format!("failed to parse config file {}", path.display()))?;
+    config.migrate();
     validate_config(&config)?;
     Ok(config)
 }
@@ -283,6 +360,17 @@ pub fn validate_config(config: &AppConfig) -> Result<()> {
     }
     config.audio.validate().map_err(anyhow::Error::msg)?;
     config.converter.validate().map_err(anyhow::Error::msg)?;
+
+    let mut seen_ids = HashSet::new();
+    for profile in &config.profiles {
+        profile
+            .validate()
+            .map_err(anyhow::Error::msg)
+            .with_context(|| format!("invalid device profile '{}'", profile.name))?;
+        if !seen_ids.insert(profile.id.as_str()) {
+            anyhow::bail!("duplicate device profile id '{}'", profile.id);
+        }
+    }
     Ok(())
 }
 
@@ -324,6 +412,14 @@ fn default_converter_map() -> String {
 
 fn default_converter_output_suffix() -> String {
     "_PAS_SAFE_FINAL.wav".to_string()
+}
+
+fn default_converter_highpass_hz() -> Option<u32> {
+    None
+}
+
+fn default_converter_lowpass_hz() -> Option<u32> {
+    None
 }
 
 fn default_ui_theme() -> UiTheme {
@@ -444,7 +540,8 @@ priority = "normal"
         let dir = tempdir().unwrap();
         let path = dir.path().join("config.toml");
         let mut config = AppConfig::default();
-        config.audio.bit_depth = 24;
+        // 24-bit is now valid; use an unsupported depth instead.
+        config.audio.bit_depth = 8;
 
         assert!(save_to_path(&config, &path).is_err());
         assert!(!path.exists());
@@ -456,5 +553,85 @@ priority = "normal"
         config.converter.volume_db = 99.0;
 
         assert!(validate_config(&config).is_err());
+    }
+
+    #[test]
+    fn migrates_v2_config_to_current_version() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("config.toml");
+        // A minimal v2 config with no profiles or active_profile_id fields.
+        let toml = r#"
+version = 2
+input_device_name = "Built-in"
+
+[audio]
+sample_rate = 16000
+channels = 1
+bit_depth = 16
+packet_duration_ms = 20
+
+[ui]
+theme = "auto"
+latch_live = false
+
+[[channels]]
+id = "channel-1"
+name = "General Announcement"
+multicast_ip = "239.10.10.1"
+port = 5004
+enabled = true
+priority = "normal"
+"#;
+        fs::write(&path, toml).unwrap();
+
+        let config = load_from_path(&path).unwrap();
+
+        assert_eq!(config.version, CURRENT_CONFIG_VERSION);
+        assert!(config.profiles.is_empty());
+        assert_eq!(config.active_profile_id, None);
+    }
+
+    #[test]
+    fn rejects_duplicate_profile_ids() {
+        use crate::profiles::{DeviceProfile, NetworkDefaults, ProfileSource};
+
+        let make = || DeviceProfile {
+            id: "dup".to_string(),
+            name: "Dup".to_string(),
+            vendor: String::new(),
+            model: String::new(),
+            builtin: false,
+            source: ProfileSource::User,
+            audio: AudioProfile::default(),
+            converter: ConverterSettings::default(),
+            network: NetworkDefaults {
+                rtp_payload_type: 96,
+                default_multicast_ip: None,
+                default_port: None,
+            },
+        };
+        let mut config = AppConfig::default();
+        config.profiles = vec![make(), make()];
+
+        assert!(validate_config(&config).is_err());
+    }
+
+    #[test]
+    fn apply_profile_sets_audio_converter_and_active_id() {
+        use crate::profiles::builtin_profiles;
+
+        let btq = builtin_profiles()
+            .into_iter()
+            .find(|p| p.id == "ateis-btq-vm")
+            .unwrap();
+        let mut config = AppConfig::default();
+
+        config.apply_profile(&btq);
+
+        assert_eq!(config.audio, btq.audio);
+        assert_eq!(config.converter, btq.converter);
+        assert_eq!(config.active_profile_id.as_deref(), Some("ateis-btq-vm"));
+        // The applied config must remain valid (24-bit / 48 kHz allowed).
+        validate_config(&config).unwrap();
     }
 }
