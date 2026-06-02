@@ -21,12 +21,12 @@ jobs:
             os: ubuntu-24.04
             artifact-name: pas-broadcaster-linux-x86_64
           - platform: windows-x86_64
-            os: windows-2025
+            os: windows-2025-vs2026
             artifact-name: pas-broadcaster-windows-x86_64
 
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@v6
 
       - name: Install Rust toolchain
         run: |
@@ -95,7 +95,7 @@ jobs:
           Compress-Archive -Path (Join-Path $packageDir "*") -DestinationPath "dist\$package.zip" -Force
 
       - name: Upload artifact
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: ${{ matrix.artifact-name }}
           path: dist/*.zip
@@ -111,7 +111,7 @@ jobs:
 
     steps:
       - name: Download artifacts
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v8
         with:
           path: dist/artifacts
 
