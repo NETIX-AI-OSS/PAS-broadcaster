@@ -30,6 +30,16 @@ pub struct AppConfig {
     /// Id of the currently applied device profile, if any.
     #[serde(default)]
     pub active_profile_id: Option<String>,
+    /// Global RTP payload type override. When `Some`, it wins over the active
+    /// profile and the bit-depth default at broadcast time.
+    #[serde(default)]
+    pub rtp_payload_type: Option<u8>,
+    /// Device default multicast group (admin-scoped). Used to seed channels.
+    #[serde(default)]
+    pub default_multicast_ip: Option<Ipv4Addr>,
+    /// Device default UDP port. Used to seed channels.
+    #[serde(default)]
+    pub default_port: Option<u16>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -103,6 +113,9 @@ impl Default for AppConfig {
             ui: UiPreferences::default(),
             profiles: Vec::new(),
             active_profile_id: None,
+            rtp_payload_type: None,
+            default_multicast_ip: None,
+            default_port: None,
         }
     }
 }
@@ -117,14 +130,6 @@ impl AppConfig {
             v if v < 3 => self.version = CURRENT_CONFIG_VERSION,
             _ => {}
         }
-    }
-
-    /// Apply a device profile's audio and converter settings, recording it as
-    /// the active profile. Channel/network defaults are applied separately by
-    /// the UI, which knows the currently selected channel.
-    pub fn apply_profile(&mut self, profile: &DeviceProfile) {
-        profile.apply_to(&mut self.audio, &mut self.converter);
-        self.active_profile_id = Some(profile.id.clone());
     }
 }
 
@@ -370,6 +375,20 @@ pub fn validate_config(config: &AppConfig) -> Result<()> {
         if !seen_ids.insert(profile.id.as_str()) {
             anyhow::bail!("duplicate device profile id '{}'", profile.id);
         }
+    }
+
+    if let Some(payload_type) = config.rtp_payload_type {
+        if !(96..=127).contains(&payload_type) {
+            anyhow::bail!(
+                "global RTP payload type {payload_type} must be in the dynamic range 96-127"
+            );
+        }
+    }
+    if let Some(port) = config.default_port {
+        validate_port(port).map_err(anyhow::Error::msg)?;
+    }
+    if let Some(ip) = config.default_multicast_ip {
+        parse_admin_multicast(&ip.to_string()).map_err(anyhow::Error::msg)?;
     }
     Ok(())
 }
@@ -619,21 +638,72 @@ priority = "normal"
     }
 
     #[test]
-    fn apply_profile_sets_audio_converter_and_active_id() {
-        use crate::profiles::builtin_profiles;
+    fn round_trips_global_network_fields() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("config.toml");
+        let config = AppConfig {
+            rtp_payload_type: Some(100),
+            default_multicast_ip: Some(Ipv4Addr::new(239, 10, 10, 5)),
+            default_port: Some(5006),
+            ..AppConfig::default()
+        };
 
-        let btq = builtin_profiles()
-            .into_iter()
-            .find(|p| p.id == "ateis-btq-vm")
-            .unwrap();
-        let mut config = AppConfig::default();
+        save_to_path(&config, &path).unwrap();
+        let loaded = load_from_path(&path).unwrap();
 
-        config.apply_profile(&btq);
+        assert_eq!(loaded, config);
+    }
 
-        assert_eq!(config.audio, btq.audio);
-        assert_eq!(config.converter, btq.converter);
-        assert_eq!(config.active_profile_id.as_deref(), Some("ateis-btq-vm"));
-        // The applied config must remain valid (24-bit / 48 kHz allowed).
+    #[test]
+    fn v3_config_without_network_fields_defaults_to_none() {
+        let toml = r#"
+version = 3
+input_device_name = "Built-in"
+
+[audio]
+sample_rate = 16000
+channels = 1
+bit_depth = 16
+packet_duration_ms = 20
+
+[ui]
+theme = "auto"
+latch_live = false
+
+[[channels]]
+id = "channel-1"
+name = "General Announcement"
+multicast_ip = "239.10.10.1"
+port = 5004
+enabled = true
+priority = "normal"
+"#;
+        let config: AppConfig = toml::from_str(toml).unwrap();
+
+        assert_eq!(config.rtp_payload_type, None);
+        assert_eq!(config.default_multicast_ip, None);
+        assert_eq!(config.default_port, None);
         validate_config(&config).unwrap();
+    }
+
+    #[test]
+    fn rejects_bad_global_network_fields() {
+        let bad_payload = AppConfig {
+            rtp_payload_type: Some(50),
+            ..AppConfig::default()
+        };
+        assert!(validate_config(&bad_payload).is_err());
+
+        let bad_port = AppConfig {
+            default_port: Some(0),
+            ..AppConfig::default()
+        };
+        assert!(validate_config(&bad_port).is_err());
+
+        let bad_ip = AppConfig {
+            default_multicast_ip: Some(Ipv4Addr::new(8, 8, 8, 8)),
+            ..AppConfig::default()
+        };
+        assert!(validate_config(&bad_ip).is_err());
     }
 }

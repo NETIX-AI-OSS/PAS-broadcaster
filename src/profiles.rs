@@ -97,12 +97,6 @@ impl DeviceProfile {
         Ok(())
     }
 
-    /// Copy this profile's audio and converter settings into the active config.
-    pub fn apply_to(&self, audio: &mut AudioProfile, converter: &mut ConverterSettings) {
-        *audio = self.audio;
-        *converter = self.converter.clone();
-    }
-
     /// Produce an editable user copy of this profile under a new id and name.
     pub fn clone_as_user(&self, new_id: &str, new_name: &str) -> Self {
         Self {
