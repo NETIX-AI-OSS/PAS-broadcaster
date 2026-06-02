@@ -30,7 +30,8 @@ jobs:
 
       - name: Install Rust toolchain
         run: |
-          rustup toolchain install stable --profile minimal --component rustfmt clippy
+          rustup toolchain install stable --profile minimal
+          rustup component add rustfmt clippy --toolchain stable
           rustup default stable
 
       - name: Install Linux build dependencies
