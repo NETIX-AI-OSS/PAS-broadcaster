@@ -36,7 +36,7 @@ pub struct PasBroadcaster {
     selected_page: Page,
     broadcast_tab: BroadcastTab,
     selected_file: Option<PathBuf>,
-    packet_duration_input: String,
+    audio_net: AudioNetEditor,
     converter: ConverterEditor,
     status: String,
     active: Option<ActiveBroadcast>,
@@ -44,6 +44,10 @@ pub struct PasBroadcaster {
     merged_profiles: Vec<DeviceProfile>,
     selected_profile: usize,
     profile_editor: ProfileEditor,
+    /// Profile selected via Apply but not yet committed to config via Save.
+    pending_profile_id: Option<String>,
+    /// When set, Save seeds the selected channel with the global mcast/port.
+    seed_channel_on_save: bool,
     log_sender: Sender<LogEvent>,
     log_receiver: Receiver<LogEvent>,
     logs: VecDeque<LogEntry>,
@@ -124,11 +128,23 @@ pub enum Message {
     ProfileEditorLowpassChanged(String),
     ProfileEditorCodecChanged(String),
     ProfileEditorOutputSuffixChanged(String),
-    ProfileEditorApplyChannelDefaults(bool),
     SaveProfileEditor,
     CancelProfileEditor,
+    // Settings draft (audio + global network) controls.
+    BitDepthSelected(u16),
+    DefaultPayloadTypeChanged(String),
+    DefaultMulticastChanged(String),
+    DefaultPortChanged(String),
+    SeedChannelOnSaveToggled(bool),
+    SaveSettings,
+    // Converter draft controls.
+    ConverterHighpassChanged(String),
+    ConverterLowpassChanged(String),
+    SaveConverterSettings,
+    // Capture live settings into profiles.
+    SaveDraftAsNewProfile,
+    UpdateActiveProfile,
     ReloadConfig,
-    SaveConfig,
     RefreshDevices,
     DrainLogs,
     ClearLogs,
@@ -216,7 +232,6 @@ struct ProfileEditor {
     output_suffix: String,
     highpass_hz: String,
     lowpass_hz: String,
-    apply_channel_defaults: bool,
     // Converter fields not surfaced in the editor (delay, volume, fades, map,
     // format) are carried through unchanged from the profile being edited.
     converter_base: ConverterSettings,
@@ -250,7 +265,6 @@ impl ProfileEditor {
             output_suffix: converter.output_suffix.clone(),
             highpass_hz: String::new(),
             lowpass_hz: String::new(),
-            apply_channel_defaults: false,
             converter_base: converter,
         }
     }
@@ -292,7 +306,6 @@ impl ProfileEditor {
                 .lowpass_hz
                 .map(|hz| hz.to_string())
                 .unwrap_or_default(),
-            apply_channel_defaults: false,
             converter_base: profile.converter.clone(),
         }
     }
@@ -484,6 +497,101 @@ impl ConverterEditor {
     }
 }
 
+/// Parsed global network defaults: (RTP payload type, multicast IP, port).
+/// Each is `None` when its draft field is blank.
+type NetworkDefaultsDraft = (Option<u8>, Option<Ipv4Addr>, Option<u16>);
+
+/// Draft editor for the Settings page: the broadcast audio format plus the
+/// three global network defaults. Edits stage here and are committed to
+/// `AppConfig` only on an explicit Save (see `PasBroadcaster::save_settings`).
+#[derive(Debug, Clone)]
+struct AudioNetEditor {
+    sample_rate: u32,
+    channels: u16,
+    bit_depth: u16,
+    packet_ms: String,
+    rtp_payload_type: String,
+    default_multicast_ip: String,
+    default_port: String,
+}
+
+impl AudioNetEditor {
+    fn from_config(config: &AppConfig) -> Self {
+        Self {
+            sample_rate: config.audio.sample_rate,
+            channels: config.audio.channels,
+            bit_depth: config.audio.bit_depth,
+            packet_ms: config.audio.packet_duration_ms.to_string(),
+            rtp_payload_type: config
+                .rtp_payload_type
+                .map(|v| v.to_string())
+                .unwrap_or_default(),
+            default_multicast_ip: config
+                .default_multicast_ip
+                .map(|v| v.to_string())
+                .unwrap_or_default(),
+            default_port: config
+                .default_port
+                .map(|v| v.to_string())
+                .unwrap_or_default(),
+        }
+    }
+
+    /// Prefill from a profile's audio + network (Apply semantics). The payload
+    /// type is written numerically so a later blank reads as "modified".
+    fn from_profile(profile: &DeviceProfile) -> Self {
+        Self {
+            sample_rate: profile.audio.sample_rate,
+            channels: profile.audio.channels,
+            bit_depth: profile.audio.bit_depth,
+            packet_ms: profile.audio.packet_duration_ms.to_string(),
+            rtp_payload_type: profile.network.rtp_payload_type.to_string(),
+            default_multicast_ip: profile
+                .network
+                .default_multicast_ip
+                .map(|v| v.to_string())
+                .unwrap_or_default(),
+            default_port: profile
+                .network
+                .default_port
+                .map(|v| v.to_string())
+                .unwrap_or_default(),
+        }
+    }
+
+    fn audio(&self) -> Result<crate::audio::AudioProfile, String> {
+        let audio = crate::audio::AudioProfile {
+            sample_rate: self.sample_rate,
+            channels: self.channels,
+            bit_depth: self.bit_depth,
+            packet_duration_ms: parse_u16_field(&self.packet_ms, "packet duration")?,
+        };
+        audio.validate()?;
+        Ok(audio)
+    }
+
+    /// Parse and validate the three global network fields. Blank = `None`.
+    fn network(&self) -> Result<NetworkDefaultsDraft, String> {
+        let payload_type =
+            parse_optional_u16_field(&self.rtp_payload_type, "RTP payload type")?.map(|v| v as u8);
+        if let Some(value) = payload_type {
+            if !(96..=127).contains(&value) {
+                return Err("RTP payload type must be between 96 and 127, or blank".to_string());
+            }
+        }
+        let multicast_ip =
+            parse_optional_ip_field(&self.default_multicast_ip, "default multicast IP")?;
+        if let Some(ip) = multicast_ip {
+            parse_admin_multicast(&ip.to_string())?;
+        }
+        let port = parse_optional_u16_field(&self.default_port, "default port")?;
+        if let Some(value) = port {
+            validate_port(value)?;
+        }
+        Ok((payload_type, multicast_ip, port))
+    }
+}
+
 impl PasBroadcaster {
     pub fn run() -> iced::Result {
         iced::application(Self::new, Self::update, Self::main_view)
@@ -523,7 +631,7 @@ impl PasBroadcaster {
             .map(|channel| ChannelEditor::from_channel(0, channel))
             .unwrap_or_else(|| ChannelEditor::new_channel(1));
 
-        let packet_duration_input = config.audio.packet_duration_ms.to_string();
+        let audio_net = AudioNetEditor::from_config(&config);
         let converter = ConverterEditor::from_settings(&config.converter);
         let merged_profiles = merge_builtins(&config.profiles);
         let (log_sender, log_receiver) = unbounded();
@@ -544,7 +652,7 @@ impl PasBroadcaster {
             selected_page: Page::Broadcast,
             broadcast_tab: BroadcastTab::Realtime,
             selected_file: None,
-            packet_duration_input,
+            audio_net,
             converter,
             status,
             active: None,
@@ -552,6 +660,8 @@ impl PasBroadcaster {
             merged_profiles,
             selected_profile: 0,
             profile_editor: ProfileEditor::new_profile(),
+            pending_profile_id: None,
+            seed_channel_on_save: false,
             log_sender,
             log_receiver,
             logs,
@@ -657,49 +767,30 @@ impl PasBroadcaster {
                 self.save_config_with_status();
             }
             Message::SampleRateSelected(sample_rate) => {
-                self.config.audio.sample_rate = sample_rate;
-                self.append_log(
-                    LogLevel::Info,
-                    format!("Selected sample rate {sample_rate} Hz"),
-                );
-                self.save_config_with_status();
+                self.audio_net.sample_rate = sample_rate;
             }
             Message::ChannelsSelected(channels) => {
-                self.config.audio.channels = channels;
-                self.append_log(
-                    LogLevel::Info,
-                    format!("Selected audio channel count {channels}"),
-                );
-                self.save_config_with_status();
+                self.audio_net.channels = channels;
+            }
+            Message::BitDepthSelected(bit_depth) => {
+                self.audio_net.bit_depth = bit_depth;
             }
             Message::PacketDurationChanged(value) => {
-                self.packet_duration_input = value;
-                let trimmed = self.packet_duration_input.trim();
-                if trimmed.is_empty() {
-                    self.set_status_with_level(LogLevel::Warning, "Packet duration is required");
-                } else if let Ok(duration) = trimmed.parse::<u16>() {
-                    let mut audio = self.config.audio;
-                    audio.packet_duration_ms = duration;
-                    if let Err(error) = audio.validate() {
-                        self.set_status_with_level(
-                            LogLevel::Warning,
-                            format!("Invalid packet duration: {error}"),
-                        );
-                    } else {
-                        self.config.audio = audio;
-                        self.append_log(
-                            LogLevel::Info,
-                            format!("Selected RTP packet duration {duration} ms"),
-                        );
-                        self.save_config_with_status();
-                    }
-                } else {
-                    self.set_status_with_level(
-                        LogLevel::Warning,
-                        "Packet duration must be a number",
-                    );
-                }
+                self.audio_net.packet_ms = value;
             }
+            Message::DefaultPayloadTypeChanged(value) => {
+                self.audio_net.rtp_payload_type = value;
+            }
+            Message::DefaultMulticastChanged(value) => {
+                self.audio_net.default_multicast_ip = value;
+            }
+            Message::DefaultPortChanged(value) => {
+                self.audio_net.default_port = value;
+            }
+            Message::SeedChannelOnSaveToggled(value) => {
+                self.seed_channel_on_save = value;
+            }
+            Message::SaveSettings => self.save_settings(),
             Message::ChooseConverterSource => {
                 return Task::perform(pick_audio_file(), Message::ConverterSourceChosen);
             }
@@ -734,46 +825,21 @@ impl PasBroadcaster {
                     self.set_status("Converter output selection cancelled");
                 }
             }
-            Message::ConverterDelayChanged(value) => {
-                self.converter.delay_ms = value;
-                self.save_converter_settings_if_valid();
-            }
-            Message::ConverterVolumeChanged(value) => {
-                self.converter.volume_db = value;
-                self.save_converter_settings_if_valid();
-            }
-            Message::ConverterFadeStartChanged(value) => {
-                self.converter.fade_start_seconds = value;
-                self.save_converter_settings_if_valid();
-            }
+            Message::ConverterDelayChanged(value) => self.converter.delay_ms = value,
+            Message::ConverterVolumeChanged(value) => self.converter.volume_db = value,
+            Message::ConverterFadeStartChanged(value) => self.converter.fade_start_seconds = value,
             Message::ConverterFadeDurationChanged(value) => {
-                self.converter.fade_duration_seconds = value;
-                self.save_converter_settings_if_valid();
+                self.converter.fade_duration_seconds = value
             }
-            Message::ConverterSampleRateChanged(value) => {
-                self.converter.sample_rate = value;
-                self.save_converter_settings_if_valid();
-            }
-            Message::ConverterChannelsChanged(value) => {
-                self.converter.channels = value;
-                self.save_converter_settings_if_valid();
-            }
-            Message::ConverterCodecChanged(value) => {
-                self.converter.codec = value;
-                self.save_converter_settings_if_valid();
-            }
-            Message::ConverterFormatChanged(value) => {
-                self.converter.format = value;
-                self.save_converter_settings_if_valid();
-            }
-            Message::ConverterMapChanged(value) => {
-                self.converter.map = value;
-                self.save_converter_settings_if_valid();
-            }
-            Message::ConverterOutputSuffixChanged(value) => {
-                self.converter.output_suffix = value;
-                self.save_converter_settings_if_valid();
-            }
+            Message::ConverterSampleRateChanged(value) => self.converter.sample_rate = value,
+            Message::ConverterChannelsChanged(value) => self.converter.channels = value,
+            Message::ConverterCodecChanged(value) => self.converter.codec = value,
+            Message::ConverterFormatChanged(value) => self.converter.format = value,
+            Message::ConverterMapChanged(value) => self.converter.map = value,
+            Message::ConverterOutputSuffixChanged(value) => self.converter.output_suffix = value,
+            Message::ConverterHighpassChanged(value) => self.converter.highpass_hz = value,
+            Message::ConverterLowpassChanged(value) => self.converter.lowpass_hz = value,
+            Message::SaveConverterSettings => self.save_converter_settings(),
             Message::ConvertOnly => return self.start_conversion(false),
             Message::ConvertAndBroadcast => return self.start_conversion(true),
             Message::ConversionFinished { broadcast, result } => {
@@ -855,13 +921,11 @@ impl PasBroadcaster {
             Message::ProfileEditorLowpassChanged(v) => self.profile_editor.lowpass_hz = v,
             Message::ProfileEditorCodecChanged(v) => self.profile_editor.codec = v,
             Message::ProfileEditorOutputSuffixChanged(v) => self.profile_editor.output_suffix = v,
-            Message::ProfileEditorApplyChannelDefaults(v) => {
-                self.profile_editor.apply_channel_defaults = v
-            }
             Message::SaveProfileEditor => self.save_profile_editor(),
             Message::CancelProfileEditor => self.profile_editor.visible = false,
+            Message::SaveDraftAsNewProfile => self.save_draft_as_new_profile(),
+            Message::UpdateActiveProfile => self.update_active_profile(),
             Message::ReloadConfig => self.reload_config(),
-            Message::SaveConfig => self.save_config_with_status(),
             Message::RefreshDevices => {
                 self.interfaces = ipv4_interfaces();
                 self.input_devices = input_device_names();
@@ -1445,6 +1509,29 @@ impl PasBroadcaster {
                     .width(Length::Fill),
                 ]
                 .spacing(12),
+                row![
+                    labeled_control(
+                        "Highpass (Hz)",
+                        "blank = off, e.g. 50",
+                        text_input("", &self.converter.highpass_hz)
+                            .padding(8)
+                            .style(self.input_style())
+                            .on_input(Message::ConverterHighpassChanged)
+                            .width(Length::Fixed(120.0)),
+                        self.palette(),
+                    ),
+                    labeled_control(
+                        "Lowpass (Hz)",
+                        "blank = off, e.g. 18000",
+                        text_input("", &self.converter.lowpass_hz)
+                            .padding(8)
+                            .style(self.input_style())
+                            .on_input(Message::ConverterLowpassChanged)
+                            .width(Length::Fixed(120.0)),
+                        self.palette(),
+                    ),
+                ]
+                .spacing(12),
             ]
             .spacing(10),
         )
@@ -1485,6 +1572,11 @@ impl PasBroadcaster {
             .spacing(8),
             text(last_text).size(13).width(Length::Fill),
             tunables,
+            row![button("Save Converter Settings")
+                .padding([8, 12])
+                .style(self.button_style(Tone::Positive))
+                .on_press(Message::SaveConverterSettings)]
+            .spacing(8),
         ]
         .spacing(10)
         .into()
@@ -1498,6 +1590,7 @@ impl PasBroadcaster {
             .collect();
         let sample_rates = vec![8_000, 16_000, 24_000, 44_100, 48_000];
         let channel_counts = vec![1, 2];
+        let bit_depths = vec![16u16, 24];
 
         let interfaces = self
             .interfaces
@@ -1543,10 +1636,10 @@ impl PasBroadcaster {
             row![
                 labeled_control(
                     "Sample rate",
-                    "RTP L16 profile Hz",
+                    "RTP PCM profile Hz",
                     pick_list(
                         sample_rates,
-                        Some(self.config.audio.sample_rate),
+                        Some(self.audio_net.sample_rate),
                         Message::SampleRateSelected
                     )
                     .padding(8)
@@ -1559,7 +1652,7 @@ impl PasBroadcaster {
                     "broadcast channel count",
                     pick_list(
                         channel_counts,
-                        Some(self.config.audio.channels),
+                        Some(self.audio_net.channels),
                         Message::ChannelsSelected
                     )
                     .padding(8)
@@ -1569,24 +1662,75 @@ impl PasBroadcaster {
                 .width(Length::FillPortion(1)),
             ]
             .spacing(12),
+            row![
+                labeled_control(
+                    "Bit depth",
+                    "16-bit L16 or 24-bit L24",
+                    pick_list(
+                        bit_depths,
+                        Some(self.audio_net.bit_depth),
+                        Message::BitDepthSelected
+                    )
+                    .padding(8)
+                    .style(self.pick_list_style()),
+                    self.palette(),
+                )
+                .width(Length::FillPortion(1)),
+                labeled_control(
+                    "Packet duration",
+                    "milliseconds per RTP packet",
+                    text_input("20", &self.audio_net.packet_ms)
+                        .padding(8)
+                        .style(self.input_style())
+                        .on_input(Message::PacketDurationChanged),
+                    self.palette(),
+                )
+                .width(Length::FillPortion(1)),
+            ]
+            .spacing(12),
+        ]
+        .spacing(10);
+
+        let network_defaults_column = column![
+            text("Target defaults").size(16),
             labeled_control(
-                "Packet duration",
-                "milliseconds per RTP packet",
-                text_input("20", &self.packet_duration_input)
+                "RTP payload type",
+                "blank = auto from profile / bit depth",
+                text_input("", &self.audio_net.rtp_payload_type)
                     .padding(8)
                     .style(self.input_style())
-                    .on_input(Message::PacketDurationChanged)
-                    .width(Length::Fixed(80.0)),
+                    .on_input(Message::DefaultPayloadTypeChanged)
+                    .width(Length::Fixed(120.0)),
                 self.palette(),
             ),
-            text("Bit depth: 16-bit L16 PCM")
-                .size(13)
-                .style(self.muted_text_style()),
+            labeled_control(
+                "Default multicast IP",
+                "device default, can seed channels",
+                text_input("", &self.audio_net.default_multicast_ip)
+                    .padding(8)
+                    .style(self.input_style())
+                    .on_input(Message::DefaultMulticastChanged),
+                self.palette(),
+            ),
+            labeled_control(
+                "Default port",
+                "device default UDP port",
+                text_input("", &self.audio_net.default_port)
+                    .padding(8)
+                    .style(self.input_style())
+                    .on_input(Message::DefaultPortChanged)
+                    .width(Length::Fixed(120.0)),
+                self.palette(),
+            ),
+            checkbox(self.seed_channel_on_save)
+                .label("On Save, seed the selected channel with these defaults")
+                .style(self.checkbox_style())
+                .on_toggle(Message::SeedChannelOnSaveToggled),
             row![
-                button("Save Config")
+                button("Save Settings")
                     .padding([8, 12])
                     .style(self.button_style(Tone::Positive))
-                    .on_press(Message::SaveConfig),
+                    .on_press(Message::SaveSettings),
                 button("Reload Config")
                     .padding([8, 12])
                     .style(self.button_style(Tone::Secondary))
@@ -1596,11 +1740,14 @@ impl PasBroadcaster {
         ]
         .spacing(10);
 
+        let active_label = self.active_profile_status_label();
         let content = column![
             section_heading("Settings", "Network and audio profile"),
+            text(active_label).size(13).style(self.muted_text_style()),
             row![
                 network_column.width(Length::FillPortion(1)),
                 audio_column.width(Length::FillPortion(1)),
+                network_defaults_column.width(Length::FillPortion(1)),
             ]
             .spacing(24)
             .align_y(iced::Alignment::Start),
@@ -1705,9 +1852,7 @@ impl PasBroadcaster {
             .map(ProfileOption::from)
             .collect();
         let selected = self
-            .config
-            .active_profile_id
-            .as_deref()
+            .effective_profile_id()
             .and_then(|id| options.iter().find(|o| o.id == id).cloned());
 
         labeled_control(
@@ -1723,17 +1868,21 @@ impl PasBroadcaster {
 
     fn profiles_page(&self) -> Element<'_, Message> {
         let active_label = self
-            .active_device_profile()
-            .map(|p| p.name.clone())
+            .effective_profile_label()
             .unwrap_or_else(|| "None (using manual audio/converter settings)".to_string());
+        let effective_id = self.effective_profile_id().map(|id| id.to_string());
 
         let mut list = column![].spacing(8);
         for (index, profile) in self.merged_profiles.iter().enumerate() {
             let selected = index == self.selected_profile;
-            let is_active = self.config.active_profile_id.as_deref() == Some(profile.id.as_str());
+            let is_active = effective_id.as_deref() == Some(profile.id.as_str());
             let mut title = profile.name.clone();
             if is_active {
-                title.push_str("  (active)");
+                if self.settings_diverge_from_profile() {
+                    title.push_str("  (active, modified)");
+                } else {
+                    title.push_str("  (active)");
+                }
             }
             let tag = if profile.builtin {
                 "Built-in"
@@ -1807,6 +1956,30 @@ impl PasBroadcaster {
         ]
         .spacing(8);
 
+        // The effective profile is updatable only when it is a user/custom one.
+        let active_is_custom = self
+            .effective_profile_id()
+            .and_then(|id| self.config.profiles.iter().find(|p| p.id == id))
+            .is_some();
+        let mut update_button = button("Update active profile")
+            .padding([8, 12])
+            .style(self.button_style(Tone::Secondary));
+        if active_is_custom {
+            update_button = update_button.on_press(Message::UpdateActiveProfile);
+        }
+        let capture_actions = row![
+            text("Capture current live settings:")
+                .size(13)
+                .style(self.muted_text_style()),
+            button("Save as new profile")
+                .padding([8, 12])
+                .style(self.button_style(Tone::Positive))
+                .on_press(Message::SaveDraftAsNewProfile),
+            update_button,
+        ]
+        .spacing(8)
+        .align_y(Alignment::Center);
+
         let mut content = column![
             section_heading(
                 "Profiles",
@@ -1827,6 +2000,7 @@ impl PasBroadcaster {
             rule::horizontal(1).style(self.rule_style()),
             list,
             actions,
+            capture_actions,
         ]
         .spacing(12);
 
@@ -1998,10 +2172,6 @@ impl PasBroadcaster {
                 ),
             ]
             .spacing(12),
-            checkbox(editor.apply_channel_defaults)
-                .label("Apply device multicast/port to the selected channel when applying")
-                .style(self.checkbox_style())
-                .on_toggle(Message::ProfileEditorApplyChannelDefaults),
             row![
                 button("Save Profile")
                     .padding([8, 12])
@@ -2152,12 +2322,74 @@ impl PasBroadcaster {
         self.merged_profiles.iter().find(|p| p.id == id)
     }
 
-    /// RTP payload type for the current broadcast: the active profile's value
-    /// if a profile is applied, otherwise the default for the audio bit depth.
+    /// RTP payload type for the current broadcast, in precedence order:
+    /// explicit config override -> active profile -> default for the bit depth.
     fn resolve_payload_type(&self) -> u8 {
-        self.active_device_profile()
-            .map(|p| p.network.rtp_payload_type)
-            .unwrap_or_else(|| default_payload_type(self.config.audio.bit_depth))
+        resolved_payload_type(
+            self.config.rtp_payload_type,
+            self.active_device_profile()
+                .map(|p| p.network.rtp_payload_type),
+            self.config.audio.bit_depth,
+        )
+    }
+
+    /// The profile the live settings are based on: the pending (just-applied,
+    /// not yet saved) profile if any, else the committed active profile.
+    fn effective_profile_id(&self) -> Option<&str> {
+        self.pending_profile_id
+            .as_deref()
+            .or(self.config.active_profile_id.as_deref())
+    }
+
+    /// True when the current Settings/Converter drafts diverge from the
+    /// effective profile's audio + converter + network values. An invalid draft
+    /// counts as modified.
+    fn settings_diverge_from_profile(&self) -> bool {
+        let Some(id) = self.effective_profile_id() else {
+            return false;
+        };
+        let Some(profile) = self.merged_profiles.iter().find(|p| p.id == id) else {
+            return false;
+        };
+        let audio_matches = self
+            .audio_net
+            .audio()
+            .map(|audio| audio == profile.audio)
+            .unwrap_or(false);
+        let converter_matches = self
+            .converter
+            .settings()
+            .map(|settings| settings == profile.converter)
+            .unwrap_or(false);
+        let network_matches = match self.audio_net.network() {
+            Ok((payload_type, multicast_ip, port)) => {
+                payload_type == Some(profile.network.rtp_payload_type)
+                    && multicast_ip == profile.network.default_multicast_ip
+                    && port == profile.network.default_port
+            }
+            Err(_) => false,
+        };
+        !(audio_matches && converter_matches && network_matches)
+    }
+
+    /// Display name of the effective profile with a "(modified)" suffix when the
+    /// drafts diverge from it.
+    fn effective_profile_label(&self) -> Option<String> {
+        let id = self.effective_profile_id()?;
+        let profile = self.merged_profiles.iter().find(|p| p.id == id)?;
+        if self.settings_diverge_from_profile() {
+            Some(format!("{} (modified)", profile.name))
+        } else {
+            Some(profile.name.clone())
+        }
+    }
+
+    /// One-line active-profile status for the Settings header.
+    fn active_profile_status_label(&self) -> String {
+        match self.effective_profile_label() {
+            Some(label) => format!("Active profile: {label}"),
+            None => "Active profile: none (manual settings)".to_string(),
+        }
     }
 
     fn start_selected(&mut self, source: BroadcastSource, source_label: &str) {
@@ -2282,44 +2514,183 @@ impl PasBroadcaster {
         }
     }
 
+    /// Build a `DeviceProfile` from the current live drafts (audio + converter +
+    /// network). Payload type falls back to the bit-depth default when blank.
+    fn draft_to_profile(&self, id: String, name: String) -> Result<DeviceProfile, String> {
+        let audio = self.audio_net.audio()?;
+        let (payload_type, multicast_ip, port) = self.audio_net.network()?;
+        let converter = self.converter.settings()?;
+        let profile = DeviceProfile {
+            id,
+            name,
+            vendor: String::new(),
+            model: String::new(),
+            builtin: false,
+            source: ProfileSource::User,
+            audio,
+            converter,
+            network: NetworkDefaults {
+                rtp_payload_type: payload_type
+                    .unwrap_or_else(|| default_payload_type(audio.bit_depth)),
+                default_multicast_ip: multicast_ip,
+                default_port: port,
+            },
+        };
+        profile.validate()?;
+        Ok(profile)
+    }
+
+    fn save_draft_as_new_profile(&mut self) {
+        let id = self.unique_profile_id("custom-device");
+        let name = format!("Custom Profile {}", self.config.profiles.len() + 1);
+        let profile = match self.draft_to_profile(id, name) {
+            Ok(profile) => profile,
+            Err(error) => {
+                self.set_status_with_level(
+                    LogLevel::Warning,
+                    format!("Cannot save profile: {error}"),
+                );
+                return;
+            }
+        };
+
+        let mut next = self.config.clone();
+        next.profiles.push(profile.clone());
+        next.active_profile_id = Some(profile.id.clone());
+        match config::save_to_path(&next, &self.config_path) {
+            Ok(()) => {
+                self.config = next;
+                self.pending_profile_id = None;
+                self.refresh_profiles();
+                if let Some(idx) = self.merged_profiles.iter().position(|p| p.id == profile.id) {
+                    self.selected_profile = idx;
+                }
+                self.set_status(format!(
+                    "Saved current settings as profile '{}'",
+                    profile.name
+                ));
+            }
+            Err(error) => self
+                .set_status_with_level(LogLevel::Error, format!("Profile save failed: {error:#}")),
+        }
+    }
+
+    fn update_active_profile(&mut self) {
+        let Some(id) = self.effective_profile_id().map(|id| id.to_string()) else {
+            self.set_status_with_level(LogLevel::Warning, "No active profile to update");
+            return;
+        };
+        let Some(index) = self.config.profiles.iter().position(|p| p.id == id) else {
+            self.set_status_with_level(
+                LogLevel::Warning,
+                "Built-in profiles cannot be updated — use Save as new profile",
+            );
+            return;
+        };
+        let name = self.config.profiles[index].name.clone();
+        let profile = match self.draft_to_profile(id.clone(), name) {
+            Ok(profile) => profile,
+            Err(error) => {
+                self.set_status_with_level(
+                    LogLevel::Warning,
+                    format!("Cannot update profile: {error}"),
+                );
+                return;
+            }
+        };
+
+        let mut next = self.config.clone();
+        next.profiles[index] = profile.clone();
+        next.active_profile_id = Some(id);
+        match config::save_to_path(&next, &self.config_path) {
+            Ok(()) => {
+                self.config = next;
+                self.pending_profile_id = None;
+                self.refresh_profiles();
+                self.set_status(format!(
+                    "Updated profile '{}' from current settings",
+                    profile.name
+                ));
+            }
+            Err(error) => self.set_status_with_level(
+                LogLevel::Error,
+                format!("Profile update failed: {error:#}"),
+            ),
+        }
+    }
+
+    /// Apply = prefill the editable drafts from the profile WITHOUT persisting.
+    /// The user reviews/edits the controls and clicks Save to commit.
     fn apply_profile_by_id(&mut self, id: &str) {
         let Some(profile) = self.merged_profiles.iter().find(|p| p.id == id).cloned() else {
             self.set_status_with_level(LogLevel::Warning, format!("Profile '{id}' not found"));
             return;
         };
 
-        self.config.apply_profile(&profile);
+        self.audio_net = AudioNetEditor::from_profile(&profile);
+        self.converter = ConverterEditor::from_settings(&profile.converter);
+        self.pending_profile_id = Some(profile.id.clone());
 
-        // Optionally align the selected channel's group/port to the device.
-        if self.profile_editor.apply_channel_defaults {
-            if let Some(channel) = self.config.channels.get_mut(self.selected_channel) {
-                if let Some(ip) = profile.network.default_multicast_ip {
+        self.set_status(format!(
+            "Loaded profile '{}' ({} Hz / {}-bit, payload type {}) into editors — review and Save to apply",
+            profile.name,
+            profile.audio.sample_rate,
+            profile.audio.bit_depth,
+            profile.network.rtp_payload_type
+        ));
+    }
+
+    /// Commit the Settings drafts (audio + global network) to config and disk,
+    /// activating any pending profile. Uses clone-then-commit for atomicity.
+    fn save_settings(&mut self) {
+        let audio = match self.audio_net.audio() {
+            Ok(audio) => audio,
+            Err(error) => {
+                self.set_status_with_level(LogLevel::Warning, format!("Cannot save: {error}"));
+                return;
+            }
+        };
+        let (payload_type, multicast_ip, port) = match self.audio_net.network() {
+            Ok(network) => network,
+            Err(error) => {
+                self.set_status_with_level(LogLevel::Warning, format!("Cannot save: {error}"));
+                return;
+            }
+        };
+
+        let mut next = self.config.clone();
+        next.audio = audio;
+        next.rtp_payload_type = payload_type;
+        next.default_multicast_ip = multicast_ip;
+        next.default_port = port;
+        if let Some(id) = self.pending_profile_id.clone() {
+            next.active_profile_id = Some(id);
+        }
+        if self.seed_channel_on_save {
+            if let Some(channel) = next.channels.get_mut(self.selected_channel) {
+                if let Some(ip) = multicast_ip {
                     channel.multicast_ip = ip;
                 }
-                if let Some(port) = profile.network.default_port {
-                    channel.port = port;
+                if let Some(p) = port {
+                    channel.port = p;
                 }
             }
         }
 
-        // Rebuild dependent editors from the freshly applied config.
-        self.packet_duration_input = self.config.audio.packet_duration_ms.to_string();
-        self.converter = ConverterEditor::from_settings(&self.config.converter);
-        if let Some(channel) = self.config.channels.get(self.selected_channel) {
-            self.editor = ChannelEditor::from_channel(self.selected_channel, channel);
+        match config::save_to_path(&next, &self.config_path) {
+            Ok(()) => {
+                self.config = next;
+                self.pending_profile_id = None;
+                if self.seed_channel_on_save {
+                    if let Some(channel) = self.config.channels.get(self.selected_channel) {
+                        self.editor = ChannelEditor::from_channel(self.selected_channel, channel);
+                    }
+                }
+                self.set_status(format!("Settings saved to {}", self.config_path.display()));
+            }
+            Err(error) => self
+                .set_status_with_level(LogLevel::Error, format!("Settings save failed: {error:#}")),
         }
-
-        self.append_log(
-            LogLevel::Info,
-            format!(
-                "Applied device profile '{}' ({} Hz / {}-bit, payload type {})",
-                profile.name,
-                profile.audio.sample_rate,
-                profile.audio.bit_depth,
-                profile.network.rtp_payload_type
-            ),
-        );
-        self.save_config_with_status();
     }
 
     fn begin_edit_profile(&mut self) {
@@ -2435,9 +2806,10 @@ impl PasBroadcaster {
         match config::load_from_path(&self.config_path) {
             Ok(config) => {
                 self.config = config;
-                self.packet_duration_input = self.config.audio.packet_duration_ms.to_string();
+                self.audio_net = AudioNetEditor::from_config(&self.config);
                 self.converter = ConverterEditor::from_settings(&self.config.converter);
                 self.refresh_profiles();
+                self.pending_profile_id = None;
                 self.selected_profile = 0;
                 self.profile_editor.visible = false;
                 self.selected_channel = 0;
@@ -2463,15 +2835,30 @@ impl PasBroadcaster {
         }
     }
 
-    fn save_converter_settings_if_valid(&mut self) {
-        if let Ok(settings) = self.converter.settings() {
-            self.config.converter = settings;
-            if let Err(error) = config::save_to_path(&self.config, &self.config_path) {
-                self.append_log(
+    fn save_converter_settings(&mut self) {
+        let settings = match self.converter.settings() {
+            Ok(settings) => settings,
+            Err(error) => {
+                self.set_status_with_level(
                     LogLevel::Warning,
-                    format!("Converter config save failed: {error:#}"),
+                    format!("Cannot save converter settings: {error}"),
                 );
+                return;
             }
+        };
+        // Clone-then-commit: a validation failure in save_to_path never leaves
+        // config or disk half-updated.
+        let mut next = self.config.clone();
+        next.converter = settings;
+        match config::save_to_path(&next, &self.config_path) {
+            Ok(()) => {
+                self.config = next;
+                self.set_status("Converter settings saved");
+            }
+            Err(error) => self.set_status_with_level(
+                LogLevel::Error,
+                format!("Converter settings save failed: {error:#}"),
+            ),
         }
     }
 
@@ -3261,5 +3648,79 @@ fn format_tunable(value: f32) -> String {
             formatted.pop();
         }
         formatted
+    }
+}
+
+/// RTP payload type precedence: explicit override -> active profile -> the
+/// default for the audio bit depth.
+fn resolved_payload_type(override_pt: Option<u8>, profile_pt: Option<u8>, bit_depth: u16) -> u8 {
+    override_pt
+        .or(profile_pt)
+        .unwrap_or_else(|| default_payload_type(bit_depth))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::profiles::builtin_profiles;
+
+    fn editor_from_btq() -> AudioNetEditor {
+        let btq = builtin_profiles()
+            .into_iter()
+            .find(|p| p.id == "ateis-btq-vm")
+            .unwrap();
+        AudioNetEditor::from_profile(&btq)
+    }
+
+    #[test]
+    fn payload_type_precedence() {
+        // Override wins over everything.
+        assert_eq!(resolved_payload_type(Some(120), Some(97), 24), 120);
+        // No override -> active profile value.
+        assert_eq!(resolved_payload_type(None, Some(97), 16), 97);
+        // Neither -> bit-depth default (96 for L16, 97 for L24).
+        assert_eq!(resolved_payload_type(None, None, 16), 96);
+        assert_eq!(resolved_payload_type(None, None, 24), 97);
+    }
+
+    #[test]
+    fn audio_net_editor_builds_from_profile() {
+        let editor = editor_from_btq();
+        let audio = editor.audio().unwrap();
+        assert_eq!(audio.sample_rate, 48_000);
+        assert_eq!(audio.bit_depth, 24);
+
+        let (payload_type, multicast_ip, port) = editor.network().unwrap();
+        assert_eq!(payload_type, Some(97));
+        assert_eq!(multicast_ip, Some(Ipv4Addr::new(239, 10, 10, 20)));
+        assert_eq!(port, Some(5004));
+    }
+
+    #[test]
+    fn audio_net_editor_rejects_bad_values() {
+        let mut editor = editor_from_btq();
+        editor.packet_ms = "5".to_string(); // below the 10ms minimum
+        assert!(editor.audio().is_err());
+
+        let mut editor = editor_from_btq();
+        editor.rtp_payload_type = "50".to_string(); // outside 96..=127
+        assert!(editor.network().is_err());
+
+        let mut editor = editor_from_btq();
+        editor.default_port = "0".to_string();
+        assert!(editor.network().is_err());
+
+        let mut editor = editor_from_btq();
+        editor.default_multicast_ip = "8.8.8.8".to_string(); // not admin-scoped
+        assert!(editor.network().is_err());
+    }
+
+    #[test]
+    fn audio_net_editor_blank_network_is_none() {
+        let mut editor = editor_from_btq();
+        editor.rtp_payload_type.clear();
+        editor.default_multicast_ip.clear();
+        editor.default_port.clear();
+        assert_eq!(editor.network().unwrap(), (None, None, None));
     }
 }
