@@ -1,0 +1,8 @@
+[Desktop Entry]
+Type=Application
+Name=PAS Broadcaster
+Comment=Broadcast Public Address System RTP L16 audio over multicast
+Exec=pas-broadcaster
+Icon=pas-broadcaster
+Terminal=false
+Categories=AudioVideo;Audio;Network;Utility;

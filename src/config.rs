@@ -9,13 +9,15 @@ use std::path::{Path, PathBuf};
 
 const CONFIG_FILE_NAME: &str = "config.toml";
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct AppConfig {
     pub version: u32,
     pub channels: Vec<BroadcastChannel>,
     pub selected_interface: Option<Ipv4Addr>,
     pub input_device_name: Option<String>,
     pub audio: AudioProfile,
+    #[serde(default)]
+    pub converter: ConverterSettings,
     pub ui: UiPreferences,
 }
 
@@ -38,19 +40,118 @@ pub enum ChannelPriority {
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct UiPreferences {
+    pub theme: UiTheme,
     pub latch_live: bool,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum UiTheme {
+    Auto,
+    Light,
+    Dark,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct ConverterSettings {
+    #[serde(default = "default_delay_ms")]
+    pub delay_ms: u32,
+    #[serde(default = "default_volume_db")]
+    pub volume_db: f32,
+    #[serde(default = "default_fade_start_seconds")]
+    pub fade_start_seconds: f32,
+    #[serde(default = "default_fade_duration_seconds")]
+    pub fade_duration_seconds: f32,
+    #[serde(default = "default_converter_sample_rate")]
+    pub sample_rate: u32,
+    #[serde(default = "default_converter_channels")]
+    pub channels: u16,
+    #[serde(default = "default_converter_codec")]
+    pub codec: String,
+    #[serde(default = "default_converter_format")]
+    pub format: String,
+    #[serde(default = "default_converter_map")]
+    pub map: String,
+    #[serde(default = "default_converter_output_suffix")]
+    pub output_suffix: String,
 }
 
 impl Default for AppConfig {
     fn default() -> Self {
         Self {
-            version: 1,
+            version: 2,
             channels: default_channels(),
             selected_interface: None,
             input_device_name: None,
             audio: AudioProfile::default(),
-            ui: UiPreferences { latch_live: false },
+            converter: ConverterSettings::default(),
+            ui: UiPreferences::default(),
         }
+    }
+}
+
+impl Default for ConverterSettings {
+    fn default() -> Self {
+        Self {
+            delay_ms: default_delay_ms(),
+            volume_db: default_volume_db(),
+            fade_start_seconds: default_fade_start_seconds(),
+            fade_duration_seconds: default_fade_duration_seconds(),
+            sample_rate: default_converter_sample_rate(),
+            channels: default_converter_channels(),
+            codec: default_converter_codec(),
+            format: default_converter_format(),
+            map: default_converter_map(),
+            output_suffix: default_converter_output_suffix(),
+        }
+    }
+}
+
+impl Default for UiPreferences {
+    fn default() -> Self {
+        Self {
+            theme: default_ui_theme(),
+            latch_live: false,
+        }
+    }
+}
+
+impl ConverterSettings {
+    pub fn validate(&self) -> Result<(), String> {
+        if self.delay_ms > 60_000 {
+            return Err("converter delay must be 60000 ms or less".to_string());
+        }
+        if !self.volume_db.is_finite() || !(-60.0..=24.0).contains(&self.volume_db) {
+            return Err("converter volume must be between -60 dB and 24 dB".to_string());
+        }
+        if !self.fade_start_seconds.is_finite() || self.fade_start_seconds < 0.0 {
+            return Err("converter fade start must be zero or greater".to_string());
+        }
+        if !self.fade_duration_seconds.is_finite() || self.fade_duration_seconds < 0.0 {
+            return Err("converter fade duration must be zero or greater".to_string());
+        }
+        if ![8_000, 16_000, 24_000, 44_100, 48_000].contains(&self.sample_rate) {
+            return Err(format!(
+                "unsupported converter sample rate {}",
+                self.sample_rate
+            ));
+        }
+        if !(1..=2).contains(&self.channels) {
+            return Err("converter channels must be 1 or 2".to_string());
+        }
+        if self.codec.trim().is_empty() {
+            return Err("converter codec cannot be empty".to_string());
+        }
+        if self.format.trim().is_empty() {
+            return Err("converter format cannot be empty".to_string());
+        }
+        if self.map.trim().is_empty() {
+            return Err("converter map cannot be empty".to_string());
+        }
+        if self.output_suffix.trim().is_empty() {
+            return Err("converter output suffix cannot be empty".to_string());
+        }
+        Ok(())
     }
 }
 
@@ -118,7 +219,15 @@ impl BroadcastChannel {
 }
 
 pub fn config_path() -> Result<PathBuf> {
-    let dirs = ProjectDirs::from("com", "netix", "FAS Broadcaster")
+    project_config_path("PAS Broadcaster")
+}
+
+fn legacy_config_path() -> Result<PathBuf> {
+    project_config_path("FAS Broadcaster")
+}
+
+fn project_config_path(app_name: &str) -> Result<PathBuf> {
+    let dirs = ProjectDirs::from("com", "netix", app_name)
         .context("could not resolve the OS user config directory")?;
     Ok(dirs.config_dir().join(CONFIG_FILE_NAME))
 }
@@ -128,6 +237,13 @@ pub fn load_or_create() -> Result<(AppConfig, PathBuf)> {
 
     if path.exists() {
         return Ok((load_from_path(&path)?, path));
+    }
+
+    let legacy_path = legacy_config_path()?;
+    if legacy_path.exists() {
+        let config = load_from_path(&legacy_path)?;
+        save_to_path(&config, &path)?;
+        return Ok((config, path));
     }
 
     let config = AppConfig::default();
@@ -166,7 +282,52 @@ pub fn validate_config(config: &AppConfig) -> Result<()> {
             .with_context(|| format!("invalid channel '{}'", channel.name))?;
     }
     config.audio.validate().map_err(anyhow::Error::msg)?;
+    config.converter.validate().map_err(anyhow::Error::msg)?;
     Ok(())
+}
+
+fn default_delay_ms() -> u32 {
+    150
+}
+
+fn default_volume_db() -> f32 {
+    -6.0
+}
+
+fn default_fade_start_seconds() -> f32 {
+    0.15
+}
+
+fn default_fade_duration_seconds() -> f32 {
+    0.10
+}
+
+fn default_converter_sample_rate() -> u32 {
+    44_100
+}
+
+fn default_converter_channels() -> u16 {
+    2
+}
+
+fn default_converter_codec() -> String {
+    "pcm_s16le".to_string()
+}
+
+fn default_converter_format() -> String {
+    "wav".to_string()
+}
+
+fn default_converter_map() -> String {
+    "0:a:0".to_string()
+}
+
+fn default_converter_output_suffix() -> String {
+    "_PAS_SAFE_FINAL.wav".to_string()
+}
+
+fn default_ui_theme() -> UiTheme {
+    UiTheme::Auto
 }
 
 #[cfg(test)]
@@ -191,6 +352,64 @@ mod tests {
         let loaded = load_from_path(&path).unwrap();
 
         assert_eq!(loaded, config);
+    }
+
+    #[test]
+    fn config_without_converter_uses_defaults() {
+        let toml = r#"
+version = 2
+input_device_name = "Built-in"
+
+[audio]
+sample_rate = 16000
+channels = 1
+bit_depth = 16
+packet_duration_ms = 20
+
+[ui]
+theme = "auto"
+latch_live = false
+
+[[channels]]
+id = "channel-1"
+name = "General Announcement"
+multicast_ip = "239.10.10.1"
+port = 5004
+enabled = true
+priority = "normal"
+"#;
+
+        let config: AppConfig = toml::from_str(toml).unwrap();
+
+        assert_eq!(config.converter, ConverterSettings::default());
+        validate_config(&config).unwrap();
+    }
+
+    #[test]
+    fn config_without_ui_theme_is_rejected() {
+        let toml = r#"
+version = 2
+input_device_name = "Built-in"
+
+[audio]
+sample_rate = 16000
+channels = 1
+bit_depth = 16
+packet_duration_ms = 20
+
+[ui]
+latch_live = false
+
+[[channels]]
+id = "channel-1"
+name = "General Announcement"
+multicast_ip = "239.10.10.1"
+port = 5004
+enabled = true
+priority = "normal"
+"#;
+
+        assert!(toml::from_str::<AppConfig>(toml).is_err());
     }
 
     #[test]
@@ -229,5 +448,13 @@ mod tests {
 
         assert!(save_to_path(&config, &path).is_err());
         assert!(!path.exists());
+    }
+
+    #[test]
+    fn rejects_invalid_converter_settings() {
+        let mut config = AppConfig::default();
+        config.converter.volume_db = 99.0;
+
+        assert!(validate_config(&config).is_err());
     }
 }

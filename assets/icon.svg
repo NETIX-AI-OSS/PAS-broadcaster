@@ -1,0 +1,17 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 256 256" role="img" aria-label="PAS Broadcaster icon">
+  <defs>
+    <linearGradient id="bg" x1="48" y1="32" x2="216" y2="232" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#0f5f68"/>
+      <stop offset="1" stop-color="#063b44"/>
+    </linearGradient>
+  </defs>
+  <rect width="256" height="256" rx="40" fill="url(#bg)"/>
+  <path d="M50 173c32-29 32-87 0-116" fill="none" stroke="#70f0df" stroke-width="15" stroke-linecap="round"/>
+  <path d="M30 142c13-13 13-38 0-51" fill="none" stroke="#b9fff3" stroke-width="12" stroke-linecap="round"/>
+  <path d="M133 64h28v147h-28z" fill="#e9fffb"/>
+  <path d="M94 83h39v93H94c-9 0-16-7-16-16v-41c0-10 7-18 16-18z" fill="#e9fffb"/>
+  <path d="M161 84l52-26c7-4 15 1 15 9v126c0 8-8 13-15 9l-52-26z" fill="#28d3bd"/>
+  <path d="M181 88v88l29 15V73z" fill="#10aa99"/>
+  <circle cx="144" cy="212" r="12" fill="#70f0df"/>
+  <path d="M57 213h114" fill="none" stroke="#b9fff3" stroke-width="13" stroke-linecap="round"/>
+</svg>

@@ -102,10 +102,10 @@ mod tests {
         let port = receiver.local_addr().unwrap().port();
 
         let sender = MulticastSender::new_with_loopback(group, port, None, true).unwrap();
-        sender.send(b"fas-test").unwrap();
+        sender.send(b"pas-test").unwrap();
 
         let mut buf = [0u8; 64];
         let (len, _) = receiver.recv_from(&mut buf).unwrap();
-        assert_eq!(&buf[..len], b"fas-test");
+        assert_eq!(&buf[..len], b"pas-test");
     }
 }

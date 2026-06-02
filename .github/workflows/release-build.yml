@@ -1,0 +1,128 @@
+name: Release Build
+
+on:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  actions: read
+  contents: write
+
+jobs:
+  build:
+    name: Build ${{ matrix.platform }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - platform: linux-x86_64
+            os: ubuntu-24.04
+            artifact-name: pas-broadcaster-linux-x86_64
+          - platform: windows-x86_64
+            os: windows-2025
+            artifact-name: pas-broadcaster-windows-x86_64
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        run: |
+          rustup toolchain install stable --profile minimal --component rustfmt clippy
+          rustup default stable
+
+      - name: Install Linux build dependencies
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            pkg-config \
+            libasound2-dev \
+            libxkbcommon-dev \
+            libwayland-dev \
+            libx11-dev \
+            libxi-dev \
+            libxrandr-dev \
+            libxcursor-dev \
+            libxinerama-dev \
+            libgl1-mesa-dev \
+            libegl1-mesa-dev \
+            zip
+
+      - name: Check formatting
+        run: cargo fmt --all -- --check
+
+      - name: Run clippy
+        run: cargo clippy --locked --all-targets -- -D warnings
+
+      - name: Run tests
+        run: cargo test --locked
+
+      - name: Build release
+        run: cargo build --locked --release
+
+      - name: Package Linux artifact
+        if: runner.os == 'Linux'
+        shell: bash
+        run: |
+          set -euo pipefail
+          tag="${GITHUB_REF_NAME}"
+          package="pas-broadcaster-${tag}-linux-x86_64"
+          mkdir -p "dist/${package}/bin"
+          mkdir -p "dist/${package}/share/applications"
+          mkdir -p "dist/${package}/share/icons/hicolor/256x256/apps"
+          cp target/release/pas-broadcaster "dist/${package}/bin/"
+          cp README.md "dist/${package}/"
+          cp assets/linux/pas-broadcaster.desktop "dist/${package}/share/applications/"
+          cp assets/linux/hicolor/256x256/apps/pas-broadcaster.png "dist/${package}/share/icons/hicolor/256x256/apps/"
+          (cd "dist/${package}" && zip -r "../${package}.zip" .)
+
+      - name: Package Windows artifact
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $tag = $env:GITHUB_REF_NAME
+          $package = "pas-broadcaster-$tag-windows-x86_64"
+          $packageDir = Join-Path "dist" $package
+          New-Item -ItemType Directory -Force -Path $packageDir | Out-Null
+          New-Item -ItemType Directory -Force -Path (Join-Path $packageDir "assets") | Out-Null
+          Copy-Item "target\release\pas-broadcaster.exe" $packageDir
+          Copy-Item "README.md" $packageDir
+          Copy-Item "assets\icon.ico" (Join-Path $packageDir "assets")
+          Compress-Archive -Path (Join-Path $packageDir "*") -DestinationPath "dist\$package.zip" -Force
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.artifact-name }}
+          path: dist/*.zip
+          if-no-files-found: error
+
+  publish:
+    name: Publish GitHub release
+    needs: build
+    runs-on: ubuntu-24.04
+    permissions:
+      actions: read
+      contents: write
+
+    steps:
+      - name: Download artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: dist/artifacts
+
+      - name: Create or update release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          tag="${GITHUB_REF_NAME}"
+          if ! gh release view "${tag}" >/dev/null 2>&1; then
+            gh release create "${tag}" --title "${tag}" --notes "Automated release build for ${tag}"
+          fi
+          mapfile -d '' files < <(find dist/artifacts -name '*.zip' -print0)
+          gh release upload "${tag}" "${files[@]}" --clobber
