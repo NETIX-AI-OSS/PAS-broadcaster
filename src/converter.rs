@@ -33,13 +33,20 @@ pub fn default_output_path(input: &Path, settings: &ConverterSettings) -> PathBu
 }
 
 pub fn build_audio_filter(settings: &ConverterSettings) -> String {
-    format!(
+    let mut filter = format!(
         "adelay={}:all=1,volume={}dB,afade=t=in:st={}:d={}",
         settings.delay_ms,
         format_db(settings.volume_db),
         format_seconds(settings.fade_start_seconds),
         format_seconds(settings.fade_duration_seconds)
-    )
+    );
+    if let Some(hz) = settings.highpass_hz {
+        filter.push_str(&format!(",highpass=f={hz}"));
+    }
+    if let Some(hz) = settings.lowpass_hz {
+        filter.push_str(&format!(",lowpass=f={hz}"));
+    }
+    filter
 }
 
 pub fn build_ffmpeg_args(
@@ -240,6 +247,41 @@ mod tests {
             build_audio_filter(&settings),
             "adelay=150:all=1,volume=-6dB,afade=t=in:st=0.15:d=0.10"
         );
+    }
+
+    #[test]
+    fn appends_band_limit_when_set() {
+        let settings = ConverterSettings {
+            highpass_hz: Some(50),
+            lowpass_hz: Some(18_000),
+            ..ConverterSettings::default()
+        };
+
+        assert_eq!(
+            build_audio_filter(&settings),
+            "adelay=150:all=1,volume=-6dB,afade=t=in:st=0.15:d=0.10,highpass=f=50,lowpass=f=18000"
+        );
+    }
+
+    #[test]
+    fn passes_s24le_codec_into_args() {
+        let settings = ConverterSettings {
+            codec: "pcm_s24le".to_string(),
+            ..ConverterSettings::default()
+        };
+        let args = build_ffmpeg_args(
+            Path::new("/tmp/in.mp3"),
+            Path::new("/tmp/out.wav"),
+            &settings,
+        )
+        .unwrap();
+        let display: Vec<String> = args
+            .iter()
+            .map(|arg| arg.to_string_lossy().into_owned())
+            .collect();
+
+        let codec_index = display.iter().position(|arg| arg == "-c:a").unwrap();
+        assert_eq!(display[codec_index + 1], "pcm_s24le");
     }
 
     #[test]

@@ -30,8 +30,8 @@ impl AudioProfile {
         if !(1..=2).contains(&self.channels) {
             return Err("channels must be 1 or 2".to_string());
         }
-        if self.bit_depth != 16 {
-            return Err("only 16-bit L16 PCM is supported in v1".to_string());
+        if ![16, 24].contains(&self.bit_depth) {
+            return Err("only 16-bit (L16) or 24-bit (L24) PCM is supported".to_string());
         }
         if !(10..=100).contains(&self.packet_duration_ms) {
             return Err("packet duration must be between 10 and 100 ms".to_string());
@@ -48,19 +48,25 @@ impl AudioProfile {
     }
 }
 
+/// Convert interleaved source samples to the target profile's sample rate and
+/// channel layout, returning normalized `f32` samples in `[-1.0, 1.0]`.
+///
+/// Quantization to the wire bit depth (16- or 24-bit PCM) happens later, in
+/// [`crate::rtp::RtpPacketizer::packetize`], so the pipeline stays bit-depth
+/// agnostic and carries full float precision until the last moment.
 pub fn convert_f32_to_profile(
     samples: &[f32],
     source_sample_rate: u32,
     source_channels: u16,
     target: AudioProfile,
-) -> Vec<i16> {
+) -> Vec<f32> {
     if samples.is_empty() || source_channels == 0 {
         return Vec::new();
     }
 
     let mono = mix_to_mono(samples, source_channels as usize);
     let resampled = resample_linear_mono(&mono, source_sample_rate, target.sample_rate);
-    expand_channels_and_quantize(&resampled, target.channels as usize)
+    expand_channels(&resampled, target.channels as usize)
 }
 
 fn mix_to_mono(samples: &[f32], channels: usize) -> Vec<f32> {
@@ -98,14 +104,13 @@ fn resample_linear_mono(
     out
 }
 
-fn expand_channels_and_quantize(samples: &[f32], channels: usize) -> Vec<i16> {
+fn expand_channels(samples: &[f32], channels: usize) -> Vec<f32> {
     let mut out = Vec::with_capacity(samples.len() * channels);
 
     for sample in samples {
         let clamped = sample.clamp(-1.0, 1.0);
-        let quantized = (clamped * i16::MAX as f32).round() as i16;
         for _ in 0..channels {
-            out.push(quantized);
+            out.push(clamped);
         }
     }
 
@@ -123,7 +128,7 @@ mod tests {
 
         let converted = convert_f32_to_profile(&source, 16_000, 2, profile);
 
-        assert_eq!(converted, vec![0, i16::MAX]);
+        assert_eq!(converted, vec![0.0, 1.0]);
     }
 
     #[test]
@@ -146,17 +151,17 @@ mod tests {
 
         let converted = convert_f32_to_profile(&source, 16_000, 1, profile);
 
-        assert_eq!(converted, vec![8192, 8192, -8192, -8192]);
+        assert_eq!(converted, vec![0.25, 0.25, -0.25, -0.25]);
     }
 
     #[test]
-    fn clamps_samples_before_quantizing() {
+    fn clamps_samples_into_unit_range() {
         let source = vec![2.0, -2.0];
         let profile = AudioProfile::default();
 
         let converted = convert_f32_to_profile(&source, 16_000, 1, profile);
 
-        assert_eq!(converted, vec![i16::MAX, -i16::MAX]);
+        assert_eq!(converted, vec![1.0, -1.0]);
     }
 
     #[test]
@@ -171,8 +176,17 @@ mod tests {
         profile.channels = 3;
         assert!(profile.validate().is_err());
 
+        // Both 16- and 24-bit PCM are supported.
         profile = AudioProfile::default();
         profile.bit_depth = 24;
+        assert!(profile.validate().is_ok());
+
+        profile = AudioProfile::default();
+        profile.bit_depth = 8;
+        assert!(profile.validate().is_err());
+
+        profile = AudioProfile::default();
+        profile.bit_depth = 32;
         assert!(profile.validate().is_err());
 
         profile = AudioProfile::default();

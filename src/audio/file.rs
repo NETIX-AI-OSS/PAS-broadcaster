@@ -10,7 +10,7 @@ use symphonia::core::io::MediaSourceStream;
 use symphonia::core::meta::MetadataOptions;
 use symphonia::core::probe::Hint;
 
-pub fn decode_file_to_profile(path: &Path, profile: AudioProfile) -> Result<Vec<i16>> {
+pub fn decode_file_to_profile(path: &Path, profile: AudioProfile) -> Result<Vec<f32>> {
     let file = File::open(path).with_context(|| format!("failed to open {}", path.display()))?;
     let media_source = MediaSourceStream::new(Box::new(file), Default::default());
 
@@ -99,10 +99,10 @@ mod tests {
         let decoded = decode_file_to_profile(&path, AudioProfile::default()).unwrap();
 
         assert_eq!(decoded.len(), 4);
-        assert_eq!(decoded[0], 0);
-        assert!(decoded[1] > 32_000);
-        assert!(decoded[2] < -32_000);
-        assert!((decoded[3] - 8192).abs() <= 1);
+        assert!(decoded[0].abs() < 1e-4);
+        assert!(decoded[1] > 0.99);
+        assert!(decoded[2] < -0.99);
+        assert!((decoded[3] - 0.25).abs() < 1e-2);
     }
 
     #[test]

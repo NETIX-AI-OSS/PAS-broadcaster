@@ -5,6 +5,7 @@ mod config;
 mod converter;
 mod log;
 mod network;
+mod profiles;
 mod rtp;
 mod validation;
 

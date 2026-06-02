@@ -7,7 +7,7 @@ use std::time::Duration;
 
 pub struct MicCapture {
     _stream: Stream,
-    receiver: Receiver<Vec<i16>>,
+    receiver: Receiver<Vec<f32>>,
 }
 
 impl MicCapture {
@@ -36,7 +36,7 @@ impl MicCapture {
         let stream_config: StreamConfig = supported_config.into();
         let source_sample_rate = stream_config.sample_rate.0;
         let source_channels = stream_config.channels;
-        let (sender, receiver) = bounded::<Vec<i16>>(32);
+        let (sender, receiver) = bounded::<Vec<f32>>(32);
 
         let err_fn = |error| eprintln!("microphone stream error: {error}");
         let stream = match sample_format {
@@ -87,7 +87,7 @@ impl MicCapture {
         })
     }
 
-    pub fn recv_timeout(&self, timeout: Duration) -> Option<Vec<i16>> {
+    pub fn recv_timeout(&self, timeout: Duration) -> Option<Vec<f32>> {
         self.receiver.recv_timeout(timeout).ok()
     }
 }
@@ -102,7 +102,7 @@ struct StreamBuildContext<'a> {
 fn build_stream<T>(
     device: &cpal::Device,
     context: StreamBuildContext<'_>,
-    sender: crossbeam_channel::Sender<Vec<i16>>,
+    sender: crossbeam_channel::Sender<Vec<f32>>,
     err_fn: impl FnMut(cpal::StreamError) + Send + 'static,
     convert: fn(T) -> f32,
 ) -> Result<Stream>
