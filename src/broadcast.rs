@@ -86,7 +86,6 @@ pub fn start_broadcast(
             stop_receiver,
             &log_sender,
         ) {
-            eprintln!("broadcast failed: {error:#}");
             emit_log(
                 &log_sender,
                 LogEvent::error(format!(
@@ -211,7 +210,7 @@ fn send_samples(
     log_sender: &Sender<LogEvent>,
 ) -> Result<()> {
     let packet_duration = Duration::from_millis(profile.packet_duration_ms as u64);
-    let total_packets = samples.chunks(profile.samples_per_packet()).len();
+    let total_packets = samples.len().div_ceil(profile.samples_per_packet());
     let mut packets_sent = 0usize;
 
     for chunk in samples.chunks(profile.samples_per_packet()) {
@@ -244,4 +243,52 @@ fn send_samples(
 
 fn emit_log(log_sender: &Sender<LogEvent>, event: LogEvent) {
     let _ = log_sender.try_send(event);
+}
+
+#[cfg(test)]
+mod tests {
+    use crate::audio::AudioProfile;
+
+    /// Helper: compute the expected packet count the same way `send_samples`
+    /// does after the O(1) fix.
+    fn expected_packets(sample_len: usize, samples_per_packet: usize) -> usize {
+        sample_len.div_ceil(samples_per_packet)
+    }
+
+    #[test]
+    fn total_packets_matches_divceil() {
+        let profile = AudioProfile::default(); // 16 kHz, 1ch, 20 ms
+        let spp = profile.samples_per_packet(); // 320
+
+        // Exact multiple.
+        assert_eq!(expected_packets(320, spp), 1);
+        assert_eq!(expected_packets(640, spp), 2);
+
+        // Non-exact — last chunk is smaller than a full packet.
+        assert_eq!(expected_packets(321, spp), 2);
+        assert_eq!(expected_packets(319, spp), 1);
+
+        // Empty slice.
+        assert_eq!(expected_packets(0, spp), 0);
+    }
+
+    #[test]
+    fn total_packets_agrees_with_chunks_len_for_exact_multiples() {
+        let profile = AudioProfile::default();
+        let spp = profile.samples_per_packet();
+
+        for n in [0, 1, 2, 5, 10] {
+            let sample_len = n * spp;
+            let via_divceil = sample_len.div_ceil(spp);
+            let via_chunks = if sample_len == 0 {
+                0
+            } else {
+                vec![0.0f32; sample_len].chunks(spp).len()
+            };
+            assert_eq!(
+                via_divceil, via_chunks,
+                "mismatch at sample_len={sample_len}"
+            );
+        }
+    }
 }

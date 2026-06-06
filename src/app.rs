@@ -1,12 +1,14 @@
 use crate::audio::mic::input_device_names;
+use crate::audio::SUPPORTED_SAMPLE_RATES;
 use crate::broadcast::{start_broadcast, BroadcastHandle, BroadcastSource};
 use crate::config::{
     self, AppConfig, BroadcastChannel, ChannelPriority, ConverterSettings, UiTheme,
 };
+use crate::converter::format_db;
 use crate::converter::{convert_audio, default_output_path, ConversionResult};
 use crate::log::{LogEvent, LogLevel};
 use crate::network::{ipv4_interfaces, NetworkInterface};
-use crate::profiles::{merge_builtins, DeviceProfile, NetworkDefaults, ProfileSource};
+use crate::profiles::{merge_builtins, DeviceProfile, NetworkDefaults};
 use crate::rtp::default_payload_type;
 use crate::validation::{parse_admin_multicast, validate_port};
 use anyhow::Context;
@@ -346,7 +348,6 @@ impl ProfileEditor {
             vendor: self.vendor.trim().to_string(),
             model: self.model.trim().to_string(),
             builtin: false,
-            source: ProfileSource::User,
             audio,
             converter,
             network,
@@ -402,13 +403,21 @@ impl ChannelEditor {
         }
     }
 
-    fn new_channel(next_index: usize) -> Self {
+    fn new_channel(
+        next_index: usize,
+        default_multicast_ip: Option<Ipv4Addr>,
+        default_port: Option<u16>,
+    ) -> Self {
         Self {
             mode: EditorMode::New,
             id: format!("channel-{next_index}"),
             name: format!("New Channel {next_index}"),
-            multicast_ip: "239.10.10.10".to_string(),
-            port: "5004".to_string(),
+            multicast_ip: default_multicast_ip
+                .map(|ip| ip.to_string())
+                .unwrap_or_else(|| "239.10.10.10".to_string()),
+            port: default_port
+                .map(|p| p.to_string())
+                .unwrap_or_else(|| "5004".to_string()),
             enabled: true,
             priority: ChannelPriority::Normal,
         }
@@ -442,7 +451,7 @@ impl ConverterEditor {
             source_file: None,
             output_path: String::new(),
             delay_ms: settings.delay_ms.to_string(),
-            volume_db: format_tunable(settings.volume_db),
+            volume_db: format_db(settings.volume_db),
             fade_start_seconds: format!("{:.2}", settings.fade_start_seconds),
             fade_duration_seconds: format!("{:.2}", settings.fade_duration_seconds),
             sample_rate: settings.sample_rate.to_string(),
@@ -629,7 +638,9 @@ impl PasBroadcaster {
             .channels
             .first()
             .map(|channel| ChannelEditor::from_channel(0, channel))
-            .unwrap_or_else(|| ChannelEditor::new_channel(1));
+            .unwrap_or_else(|| {
+                ChannelEditor::new_channel(1, config.default_multicast_ip, config.default_port)
+            });
 
         let audio_net = AudioNetEditor::from_config(&config);
         let converter = ConverterEditor::from_settings(&config.converter);
@@ -885,7 +896,11 @@ impl PasBroadcaster {
                 }
             }
             Message::NewChannel => {
-                self.editor = ChannelEditor::new_channel(self.config.channels.len() + 1);
+                self.editor = ChannelEditor::new_channel(
+                    self.config.channels.len() + 1,
+                    self.config.default_multicast_ip,
+                    self.config.default_port,
+                );
             }
             Message::DeleteSelected => self.delete_selected_channel(),
             Message::EditorNameChanged(value) => self.editor.name = value,
@@ -1168,16 +1183,8 @@ impl PasBroadcaster {
             })
             .unwrap_or_else(|| "No channel selected".to_string());
 
-        let realtime_style = if self.broadcast_tab == BroadcastTab::Realtime {
-            self.button_style(Tone::Primary)
-        } else {
-            self.button_style(Tone::Secondary)
-        };
-        let file_style = if self.broadcast_tab == BroadcastTab::FileUpload {
-            self.button_style(Tone::Primary)
-        } else {
-            self.button_style(Tone::Secondary)
-        };
+        let realtime_style = self.tab_button_style(BroadcastTab::Realtime);
+        let file_style = self.tab_button_style(BroadcastTab::FileUpload);
         let tab_content = match self.broadcast_tab {
             BroadcastTab::Realtime => self.realtime_view(),
             BroadcastTab::FileUpload => self.file_upload_view(),
@@ -1588,7 +1595,7 @@ impl PasBroadcaster {
             .iter()
             .map(|interface| interface.addr)
             .collect();
-        let sample_rates = vec![8_000, 16_000, 24_000, 44_100, 48_000];
+        let sample_rates = SUPPORTED_SAMPLE_RATES.to_vec();
         let channel_counts = vec![1, 2];
         let bit_depths = vec![16u16, 24];
 
@@ -2526,7 +2533,6 @@ impl PasBroadcaster {
             vendor: String::new(),
             model: String::new(),
             builtin: false,
-            source: ProfileSource::User,
             audio,
             converter,
             network: NetworkDefaults {
@@ -2954,6 +2960,22 @@ impl PasBroadcaster {
             } else {
                 button_style_for(palette, Tone::Ghost, status)
             }
+        }
+    }
+
+    fn tab_button_style(
+        &self,
+        tab: BroadcastTab,
+    ) -> impl Fn(&Theme, button::Status) -> button::Style + 'static {
+        let palette = self.palette();
+        let active = self.broadcast_tab == tab;
+        move |_theme, status| {
+            let tone = if active {
+                Tone::Primary
+            } else {
+                Tone::Secondary
+            };
+            button_style_for(palette, tone, status)
         }
     }
 
@@ -3580,75 +3602,63 @@ async fn copy_converted_file(source: PathBuf, destination: PathBuf) -> Result<Pa
     Ok(destination)
 }
 
-fn parse_u32_field(value: &str, label: &str) -> Result<u32, String> {
+/// Parse a required field into any type that implements [`std::str::FromStr`].
+///
+/// `error_suffix` is appended after the label in the error message, e.g.
+/// `"must be a whole number"` or `"must be a number"`.
+fn parse_field<T: std::str::FromStr>(
+    value: &str,
+    label: &str,
+    error_suffix: &str,
+) -> Result<T, String> {
     value
         .trim()
         .parse()
-        .map_err(|_| format!("{label} must be a whole number"))
+        .map_err(|_| format!("{label} {error_suffix}"))
+}
+
+fn parse_u32_field(value: &str, label: &str) -> Result<u32, String> {
+    parse_field(value, label, "must be a whole number")
 }
 
 fn parse_u16_field(value: &str, label: &str) -> Result<u16, String> {
-    value
-        .trim()
-        .parse()
-        .map_err(|_| format!("{label} must be a whole number"))
+    parse_field(value, label, "must be a whole number")
 }
 
 fn parse_f32_field(value: &str, label: &str) -> Result<f32, String> {
-    value
-        .trim()
+    parse_field(value, label, "must be a number")
+}
+
+/// Parse an optional field: blank means "disabled" (`None`).
+///
+/// `error_suffix` is appended after the label in the error message, e.g.
+/// `"must be a whole number or blank"`.
+fn parse_optional_field<T: std::str::FromStr>(
+    value: &str,
+    label: &str,
+    error_suffix: &str,
+) -> Result<Option<T>, String> {
+    let trimmed = value.trim();
+    if trimmed.is_empty() {
+        return Ok(None);
+    }
+    trimmed
         .parse()
-        .map_err(|_| format!("{label} must be a number"))
+        .map(Some)
+        .map_err(|_| format!("{label} {error_suffix}"))
 }
 
 /// Parse an optional whole-number field: blank means "disabled" (`None`).
 fn parse_optional_u32_field(value: &str, label: &str) -> Result<Option<u32>, String> {
-    let trimmed = value.trim();
-    if trimmed.is_empty() {
-        return Ok(None);
-    }
-    trimmed
-        .parse()
-        .map(Some)
-        .map_err(|_| format!("{label} must be a whole number or blank"))
+    parse_optional_field(value, label, "must be a whole number or blank")
 }
 
 fn parse_optional_u16_field(value: &str, label: &str) -> Result<Option<u16>, String> {
-    let trimmed = value.trim();
-    if trimmed.is_empty() {
-        return Ok(None);
-    }
-    trimmed
-        .parse()
-        .map(Some)
-        .map_err(|_| format!("{label} must be a whole number or blank"))
+    parse_optional_field(value, label, "must be a whole number or blank")
 }
 
 fn parse_optional_ip_field(value: &str, label: &str) -> Result<Option<Ipv4Addr>, String> {
-    let trimmed = value.trim();
-    if trimmed.is_empty() {
-        return Ok(None);
-    }
-    trimmed
-        .parse()
-        .map(Some)
-        .map_err(|_| format!("{label} must be a valid IPv4 address or blank"))
-}
-
-fn format_tunable(value: f32) -> String {
-    let rounded = value.round();
-    if (value - rounded).abs() < f32::EPSILON {
-        format!("{rounded:.0}")
-    } else {
-        let mut formatted = format!("{value:.2}");
-        while formatted.contains('.') && formatted.ends_with('0') {
-            formatted.pop();
-        }
-        if formatted.ends_with('.') {
-            formatted.pop();
-        }
-        formatted
-    }
+    parse_optional_field(value, label, "must be a valid IPv4 address or blank")
 }
 
 /// RTP payload type precedence: explicit override -> active profile -> the

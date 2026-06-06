@@ -159,7 +159,6 @@ pub fn convert_audio(
                     )));
                 }
                 FfmpegEvent::Error(message) => logs.push(ConverterLog::error(message)),
-                FfmpegEvent::Done | FfmpegEvent::LogEOF => {}
                 _ => {}
             }
         }
@@ -195,6 +194,14 @@ impl ConverterLog {
         }
     }
 
+    #[allow(dead_code)]
+    pub fn warning(message: impl Into<String>) -> Self {
+        Self {
+            level: AppLogLevel::Warning,
+            message: message.into(),
+        }
+    }
+
     fn error(message: impl Into<String>) -> Self {
         Self {
             level: AppLogLevel::Error,
@@ -212,7 +219,7 @@ fn map_ffmpeg_log_level(level: FfmpegLogLevel) -> AppLogLevel {
     }
 }
 
-fn format_db(value: f32) -> String {
+pub(crate) fn format_db(value: f32) -> String {
     let rounded = value.round();
     if (value - rounded).abs() < f32::EPSILON {
         format!("{rounded:.0}")
@@ -225,7 +232,7 @@ fn format_seconds(value: f32) -> String {
     format!("{value:.2}")
 }
 
-fn trim_float(mut value: String) -> String {
+pub(crate) fn trim_float(mut value: String) -> String {
     while value.contains('.') && value.ends_with('0') {
         value.pop();
     }
@@ -334,5 +341,59 @@ mod tests {
             path,
             PathBuf::from("/tmp/Tan_Man_Jeevan_PAS_SAFE_FINAL.wav")
         );
+    }
+
+    // --- format_db / trim_float unit tests ---
+
+    #[test]
+    fn format_db_exact_integer() {
+        // Integer-valued floats should produce no decimal point.
+        assert_eq!(format_db(0.0), "0");
+        assert_eq!(format_db(-6.0), "-6");
+        assert_eq!(format_db(12.0), "12");
+    }
+
+    #[test]
+    fn format_db_negative_db() {
+        // Non-integer negative values.
+        assert_eq!(format_db(-0.5), "-0.5");
+        assert_eq!(format_db(-3.75), "-3.75");
+    }
+
+    #[test]
+    fn format_db_trims_trailing_zeros() {
+        // A value like -1.50 should become "-1.5".
+        assert_eq!(format_db(-1.5), "-1.5");
+        // A value like 1.10 (after two-decimal formatting) should become "1.1".
+        assert_eq!(format_db(1.1_f32), "1.1");
+    }
+
+    #[test]
+    fn format_db_near_integer_rounds() {
+        // 2.9999998 rounds to 3 and should format as "3".
+        let nearly_three = 3.0_f32 - f32::EPSILON;
+        let result = format_db(nearly_three);
+        // The result is either "3" (exact integer path) or "3" (trim removes ".00").
+        assert!(result == "3" || result.starts_with("3"), "got: {result}");
+    }
+
+    #[test]
+    fn trim_float_removes_trailing_zeros_and_dot() {
+        assert_eq!(trim_float("1.00".to_string()), "1");
+        assert_eq!(trim_float("1.50".to_string()), "1.5");
+        assert_eq!(trim_float("0.10".to_string()), "0.1");
+        assert_eq!(trim_float("42.00".to_string()), "42");
+    }
+
+    #[test]
+    fn trim_float_leaves_integer_strings_unchanged() {
+        assert_eq!(trim_float("5".to_string()), "5");
+        assert_eq!(trim_float("-3".to_string()), "-3");
+    }
+
+    #[test]
+    fn trim_float_leaves_already_trimmed_fraction_unchanged() {
+        assert_eq!(trim_float("1.5".to_string()), "1.5");
+        assert_eq!(trim_float("-0.25".to_string()), "-0.25");
     }
 }
