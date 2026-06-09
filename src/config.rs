@@ -1,4 +1,4 @@
-use crate::audio::AudioProfile;
+use crate::audio::{AudioProfile, SUPPORTED_SAMPLE_RATES};
 use crate::profiles::DeviceProfile;
 use crate::validation::{parse_admin_multicast, validate_port};
 use anyhow::{Context, Result};
@@ -175,7 +175,7 @@ impl ConverterSettings {
         if !self.fade_duration_seconds.is_finite() || self.fade_duration_seconds < 0.0 {
             return Err("converter fade duration must be zero or greater".to_string());
         }
-        if ![8_000, 16_000, 24_000, 44_100, 48_000].contains(&self.sample_rate) {
+        if !SUPPORTED_SAMPLE_RATES.contains(&self.sample_rate) {
             return Err(format!(
                 "unsupported converter sample rate {}",
                 self.sample_rate
@@ -612,7 +612,7 @@ priority = "normal"
 
     #[test]
     fn rejects_duplicate_profile_ids() {
-        use crate::profiles::{DeviceProfile, NetworkDefaults, ProfileSource};
+        use crate::profiles::{DeviceProfile, NetworkDefaults};
 
         let make = || DeviceProfile {
             id: "dup".to_string(),
@@ -620,7 +620,6 @@ priority = "normal"
             vendor: String::new(),
             model: String::new(),
             builtin: false,
-            source: ProfileSource::User,
             audio: AudioProfile::default(),
             converter: ConverterSettings::default(),
             network: NetworkDefaults {

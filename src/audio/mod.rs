@@ -3,6 +3,10 @@ pub mod mic;
 
 use serde::{Deserialize, Serialize};
 
+/// All sample rates accepted by [`AudioProfile::validate`] and
+/// [`crate::config::ConverterSettings::validate`].
+pub const SUPPORTED_SAMPLE_RATES: [u32; 5] = [8_000, 16_000, 24_000, 44_100, 48_000];
+
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 pub struct AudioProfile {
     pub sample_rate: u32,
@@ -24,7 +28,7 @@ impl Default for AudioProfile {
 
 impl AudioProfile {
     pub fn validate(&self) -> Result<(), String> {
-        if ![8_000, 16_000, 24_000, 44_100, 48_000].contains(&self.sample_rate) {
+        if !SUPPORTED_SAMPLE_RATES.contains(&self.sample_rate) {
             return Err(format!("unsupported sample rate {}", self.sample_rate));
         }
         if !(1..=2).contains(&self.channels) {

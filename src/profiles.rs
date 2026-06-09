@@ -33,17 +33,6 @@ pub struct NetworkDefaults {
     pub default_port: Option<u16>,
 }
 
-/// Where a profile came from.
-#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Default)]
-#[serde(rename_all = "snake_case")]
-pub enum ProfileSource {
-    /// Shipped with the application (read-only; not persisted).
-    Builtin,
-    /// Created or customized by the user (editable; persisted).
-    #[default]
-    User,
-}
-
 /// A named target hardware profile.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct DeviceProfile {
@@ -60,9 +49,6 @@ pub struct DeviceProfile {
     /// True for shipped profiles. Forced by the loader; ignored on user input.
     #[serde(default)]
     pub builtin: bool,
-    /// Origin of this profile. Defaults to [`ProfileSource::User`].
-    #[serde(default)]
-    pub source: ProfileSource,
     /// Broadcast audio format.
     pub audio: AudioProfile,
     /// File re-encode settings.
@@ -103,7 +89,6 @@ impl DeviceProfile {
             id: new_id.to_string(),
             name: new_name.to_string(),
             builtin: false,
-            source: ProfileSource::User,
             ..self.clone()
         }
     }
@@ -118,7 +103,6 @@ pub fn builtin_profiles() -> Vec<DeviceProfile> {
         toml::from_str(BUILTIN_TOML).expect("bundled device_profiles.toml must parse");
     for profile in &mut parsed.profiles {
         profile.builtin = true;
-        profile.source = ProfileSource::Builtin;
     }
     parsed.profiles
 }
@@ -146,9 +130,7 @@ mod tests {
     fn builtin_toml_parses_and_is_marked_builtin() {
         let profiles = builtin_profiles();
         assert!(!profiles.is_empty());
-        assert!(profiles
-            .iter()
-            .all(|p| p.builtin && p.source == ProfileSource::Builtin));
+        assert!(profiles.iter().all(|p| p.builtin));
 
         let btq = profiles
             .iter()
@@ -199,7 +181,7 @@ mod tests {
             merged.iter().filter(|p| p.id == "ateis-btq-vm").collect();
         assert_eq!(matches.len(), 1);
         assert_eq!(matches[0].name, "My Custom BTQ");
-        assert_eq!(matches[0].source, ProfileSource::User);
+        assert!(!matches[0].builtin);
     }
 
     #[test]
@@ -217,7 +199,6 @@ mod tests {
             .unwrap();
         let clone = builtin.clone_as_user("ateis-btq-vm-copy", "BTQ Copy");
         assert!(!clone.builtin);
-        assert_eq!(clone.source, ProfileSource::User);
         assert_eq!(clone.audio, builtin.audio);
     }
 
@@ -228,7 +209,6 @@ mod tests {
             vendor: "Test".to_string(),
             model: "Model".to_string(),
             builtin: false,
-            source: ProfileSource::User,
             audio: AudioProfile::default(),
             converter: ConverterSettings::default(),
             network: NetworkDefaults {
