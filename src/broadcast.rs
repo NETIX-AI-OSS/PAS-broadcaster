@@ -249,8 +249,7 @@ fn emit_log(log_sender: &Sender<LogEvent>, event: LogEvent) {
 mod tests {
     use crate::audio::AudioProfile;
 
-    /// Helper: compute the expected packet count the same way `send_samples`
-    /// does after the O(1) fix.
+    /// Compute the expected packet count the same way `send_samples` does.
     fn expected_packets(sample_len: usize, samples_per_packet: usize) -> usize {
         sample_len.div_ceil(samples_per_packet)
     }

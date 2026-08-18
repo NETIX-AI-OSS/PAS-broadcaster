@@ -213,8 +213,7 @@ enum EditorMode {
     New,
 }
 
-/// String-backed editor for a [`DeviceProfile`], mirroring [`ChannelEditor`].
-/// Editing only ever produces *user* profiles; built-ins are cloned first.
+/// String-backed editor for a [`DeviceProfile`], mirroring [`ChannelEditor`]; editing only ever produces *user* profiles, built-ins are cloned first.
 #[derive(Debug, Clone)]
 struct ProfileEditor {
     visible: bool,
@@ -270,8 +269,7 @@ impl ProfileEditor {
         }
     }
 
-    /// Editor populated from an existing profile. `mode` is `Existing(index)`
-    /// for a user profile (saved in place) or `New` when cloning a built-in.
+    /// Editor populated from an existing profile; `mode` is `Existing(index)` for a saved user profile or `New` when cloning a built-in.
     fn from_profile(mode: EditorMode, profile: &DeviceProfile) -> Self {
         Self {
             visible: true,
@@ -504,13 +502,10 @@ impl ConverterEditor {
     }
 }
 
-/// Parsed global network defaults: (RTP payload type, multicast IP, port).
-/// Each is `None` when its draft field is blank.
+/// Parsed global network defaults: (RTP payload type, multicast IP, port), each `None` when its draft field is blank.
 type NetworkDefaultsDraft = (Option<u8>, Option<Ipv4Addr>, Option<u16>);
 
-/// Draft editor for the Settings page: the broadcast audio format plus the
-/// three global network defaults. Edits stage here and are committed to
-/// `AppConfig` only on an explicit Save (see `PasBroadcaster::save_settings`).
+/// Draft editor for the Settings page (audio format + global network defaults); commits to `AppConfig` only on explicit Save.
 #[derive(Debug, Clone)]
 struct AudioNetEditor {
     sample_rate: u32,
@@ -544,8 +539,7 @@ impl AudioNetEditor {
         }
     }
 
-    /// Prefill from a profile's audio + network (Apply semantics). The payload
-    /// type is written numerically so a later blank reads as "modified".
+    /// Prefill from a profile's audio + network (Apply semantics); payload type is written numerically so a later blank reads as "modified".
     fn from_profile(profile: &DeviceProfile) -> Self {
         Self {
             sample_rate: profile.audio.sample_rate,
@@ -1848,8 +1842,7 @@ impl PasBroadcaster {
         .into()
     }
 
-    /// A `pick_list` for choosing the active device profile, reused on the
-    /// Broadcast and Converter pages.
+    /// A `pick_list` for choosing the active device profile, reused on the Broadcast and Converter pages.
     fn profile_selector(&self) -> Element<'_, Message> {
         let options: Vec<ProfileOption> = self
             .merged_profiles
@@ -2327,8 +2320,7 @@ impl PasBroadcaster {
         self.merged_profiles.iter().find(|p| p.id == id)
     }
 
-    /// RTP payload type for the current broadcast, in precedence order:
-    /// explicit config override -> active profile -> default for the bit depth.
+    /// RTP payload type for the current broadcast: explicit config override -> active profile -> bit-depth default.
     fn resolve_payload_type(&self) -> u8 {
         resolved_payload_type(
             self.config.rtp_payload_type,
@@ -2338,17 +2330,14 @@ impl PasBroadcaster {
         )
     }
 
-    /// The profile the live settings are based on: the pending (just-applied,
-    /// not yet saved) profile if any, else the committed active profile.
+    /// The profile the live settings are based on: the pending (applied-not-saved) profile if any, else the committed active profile.
     fn effective_profile_id(&self) -> Option<&str> {
         self.pending_profile_id
             .as_deref()
             .or(self.config.active_profile_id.as_deref())
     }
 
-    /// True when the current Settings/Converter drafts diverge from the
-    /// effective profile's audio + converter + network values. An invalid draft
-    /// counts as modified.
+    /// True when the current Settings/Converter drafts diverge from the effective profile's values; an invalid draft counts as modified.
     fn settings_diverge_from_profile(&self) -> bool {
         let Some(id) = self.effective_profile_id() else {
             return false;
@@ -2377,8 +2366,7 @@ impl PasBroadcaster {
         !(audio_matches && converter_matches && network_matches)
     }
 
-    /// Display name of the effective profile with a "(modified)" suffix when the
-    /// drafts diverge from it.
+    /// Display name of the effective profile with a "(modified)" suffix when the drafts diverge from it.
     fn effective_profile_label(&self) -> Option<String> {
         let id = self.effective_profile_id()?;
         let profile = self.merged_profiles.iter().find(|p| p.id == id)?;
@@ -2519,8 +2507,7 @@ impl PasBroadcaster {
         }
     }
 
-    /// Build a `DeviceProfile` from the current live drafts (audio + converter +
-    /// network). Payload type falls back to the bit-depth default when blank.
+    /// Build a `DeviceProfile` from the current live drafts; payload type falls back to the bit-depth default when blank.
     fn draft_to_profile(&self, id: String, name: String) -> Result<DeviceProfile, String> {
         let audio = self.audio_net.audio()?;
         let (payload_type, multicast_ip, port) = self.audio_net.network()?;
@@ -2623,8 +2610,7 @@ impl PasBroadcaster {
         }
     }
 
-    /// Apply = prefill the editable drafts from the profile WITHOUT persisting.
-    /// The user reviews/edits the controls and clicks Save to commit.
+    /// Apply prefills the editable drafts from the profile without persisting; the user clicks Save to commit.
     fn apply_profile_by_id(&mut self, id: &str) {
         let Some(profile) = self.merged_profiles.iter().find(|p| p.id == id).cloned() else {
             self.set_status_with_level(LogLevel::Warning, format!("Profile '{id}' not found"));
@@ -2644,8 +2630,7 @@ impl PasBroadcaster {
         ));
     }
 
-    /// Commit the Settings drafts (audio + global network) to config and disk,
-    /// activating any pending profile. Uses clone-then-commit for atomicity.
+    /// Commit the Settings drafts to config and disk, activating any pending profile, via clone-then-commit for atomicity.
     fn save_settings(&mut self) {
         let audio = match self.audio_net.audio() {
             Ok(audio) => audio,
@@ -3598,10 +3583,7 @@ async fn copy_converted_file(source: PathBuf, destination: PathBuf) -> Result<Pa
     Ok(destination)
 }
 
-/// Parse a required field into any type that implements [`std::str::FromStr`].
-///
-/// `error_suffix` is appended after the label in the error message, e.g.
-/// `"must be a whole number"` or `"must be a number"`.
+/// Parse a required field into any [`std::str::FromStr`] type; `error_suffix` is appended after the label in the error message.
 fn parse_field<T: std::str::FromStr>(
     value: &str,
     label: &str,
@@ -3625,10 +3607,7 @@ fn parse_f32_field(value: &str, label: &str) -> Result<f32, String> {
     parse_field(value, label, "must be a number")
 }
 
-/// Parse an optional field: blank means "disabled" (`None`).
-///
-/// `error_suffix` is appended after the label in the error message, e.g.
-/// `"must be a whole number or blank"`.
+/// Parse an optional field where blank means "disabled" (`None`); `error_suffix` is appended after the label in the error message.
 fn parse_optional_field<T: std::str::FromStr>(
     value: &str,
     label: &str,
@@ -3657,8 +3636,7 @@ fn parse_optional_ip_field(value: &str, label: &str) -> Result<Option<Ipv4Addr>,
     parse_optional_field(value, label, "must be a valid IPv4 address or blank")
 }
 
-/// RTP payload type precedence: explicit override -> active profile -> the
-/// default for the audio bit depth.
+/// RTP payload type precedence: explicit override -> active profile -> default for the audio bit depth.
 fn resolved_payload_type(override_pt: Option<u8>, profile_pt: Option<u8>, bit_depth: u16) -> u8 {
     override_pt
         .or(profile_pt)

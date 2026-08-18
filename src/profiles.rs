@@ -1,15 +1,4 @@
-//! Target hardware device profiles.
-//!
-//! A [`DeviceProfile`] bundles everything needed to make the broadcaster speak
-//! a particular receiver's language: the broadcast [`AudioProfile`], the FFmpeg
-//! [`ConverterSettings`] used to re-encode files, and [`NetworkDefaults`] (RTP
-//! payload type plus a suggested multicast group/port). Selecting a profile
-//! aligns the live RTP stream and the file re-encode to what the device
-//! expects.
-//!
-//! Built-in profiles are compiled from `assets/device_profiles.toml` and merged
-//! with the user's own profiles at load time. Built-ins are never persisted to
-//! the user's config; user profiles (including clones of built-ins) are.
+//! A [`DeviceProfile`] bundles the broadcast [`AudioProfile`], FFmpeg [`ConverterSettings`], and [`NetworkDefaults`] needed to match a target receiver; built-ins compile from `assets/device_profiles.toml` and merge with user profiles at load time, but are never persisted.
 
 use crate::audio::AudioProfile;
 use crate::config::ConverterSettings;
@@ -94,10 +83,7 @@ impl DeviceProfile {
     }
 }
 
-/// The profiles shipped with the binary, with their origin markers forced.
-///
-/// Panics if the bundled asset fails to parse — it is compiled in, so any
-/// failure is a build-time mistake that should surface loudly in tests/CI.
+/// The profiles shipped with the binary, with their origin markers forced; panics if the compiled-in asset fails to parse.
 pub fn builtin_profiles() -> Vec<DeviceProfile> {
     let mut parsed: ProfilesFile =
         toml::from_str(BUILTIN_TOML).expect("bundled device_profiles.toml must parse");
@@ -107,11 +93,7 @@ pub fn builtin_profiles() -> Vec<DeviceProfile> {
     parsed.profiles
 }
 
-/// Merge built-in profiles with the user's profiles for display/selection.
-///
-/// On an id collision the user's copy wins (they cloned-to-customize) and the
-/// shadowed built-in is dropped, so the result never contains duplicate ids.
-/// Built-ins come first, followed by any distinct user profiles.
+/// Merge built-ins with user profiles for display/selection; on an id collision the user's copy wins and the built-in is dropped.
 pub fn merge_builtins(user: &[DeviceProfile]) -> Vec<DeviceProfile> {
     let user_ids: HashSet<&str> = user.iter().map(|p| p.id.as_str()).collect();
     let mut merged: Vec<DeviceProfile> = builtin_profiles()

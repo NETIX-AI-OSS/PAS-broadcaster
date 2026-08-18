@@ -3,8 +3,7 @@ pub mod mic;
 
 use serde::{Deserialize, Serialize};
 
-/// All sample rates accepted by [`AudioProfile::validate`] and
-/// [`crate::config::ConverterSettings::validate`].
+/// All sample rates accepted by [`AudioProfile::validate`] and [`crate::config::ConverterSettings::validate`].
 pub const SUPPORTED_SAMPLE_RATES: [u32; 5] = [8_000, 16_000, 24_000, 44_100, 48_000];
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
@@ -52,12 +51,7 @@ impl AudioProfile {
     }
 }
 
-/// Convert interleaved source samples to the target profile's sample rate and
-/// channel layout, returning normalized `f32` samples in `[-1.0, 1.0]`.
-///
-/// Quantization to the wire bit depth (16- or 24-bit PCM) happens later, in
-/// [`crate::rtp::RtpPacketizer::packetize`], so the pipeline stays bit-depth
-/// agnostic and carries full float precision until the last moment.
+/// Convert interleaved source samples to the target profile's rate/channels as normalized `f32` in `[-1.0, 1.0]`; bit-depth quantization happens later in [`crate::rtp::RtpPacketizer::packetize`].
 pub fn convert_f32_to_profile(
     samples: &[f32],
     source_sample_rate: u32,
