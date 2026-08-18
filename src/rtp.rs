@@ -64,9 +64,7 @@ impl RtpPacketizer {
         }
     }
 
-    /// Serialize normalized `f32` samples (`[-1.0, 1.0]`) into one RTP packet,
-    /// quantizing to the configured bit depth: big-endian L16 (2 bytes) or
-    /// L24 (3 bytes, RFC 3190).
+    /// Serialize normalized `f32` samples (`[-1.0, 1.0]`) into one RTP packet, quantizing to big-endian L16 or L24.
     pub fn packetize(&mut self, samples: &[f32]) -> Vec<u8> {
         let bytes_per_sample = if self.bit_depth == 24 { 3 } else { 2 };
         let mut packet = Vec::with_capacity(12 + samples.len() * bytes_per_sample);

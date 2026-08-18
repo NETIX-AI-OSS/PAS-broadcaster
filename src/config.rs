@@ -23,21 +23,19 @@ pub struct AppConfig {
     #[serde(default)]
     pub converter: ConverterSettings,
     pub ui: UiPreferences,
-    /// User-created device profiles. Built-in profiles are never stored here;
-    /// they are merged in from the bundled asset at runtime.
+    /// User-created device profiles; built-ins are merged in from the bundled asset at runtime, not stored here.
     #[serde(default)]
     pub profiles: Vec<DeviceProfile>,
     /// Id of the currently applied device profile, if any.
     #[serde(default)]
     pub active_profile_id: Option<String>,
-    /// Global RTP payload type override. When `Some`, it wins over the active
-    /// profile and the bit-depth default at broadcast time.
+    /// Global RTP payload type override; wins over the active profile and bit-depth default at broadcast time.
     #[serde(default)]
     pub rtp_payload_type: Option<u8>,
-    /// Device default multicast group (admin-scoped). Used to seed channels.
+    /// Device default multicast group (admin-scoped), used to seed channels.
     #[serde(default)]
     pub default_multicast_ip: Option<Ipv4Addr>,
-    /// Device default UDP port. Used to seed channels.
+    /// Device default UDP port, used to seed channels.
     #[serde(default)]
     pub default_port: Option<u16>,
 }
@@ -121,10 +119,7 @@ impl Default for AppConfig {
 }
 
 impl AppConfig {
-    /// Upgrade an older config in place to [`CURRENT_CONFIG_VERSION`].
-    ///
-    /// New fields use serde defaults on read, so migration is mostly a version
-    /// stamp today; the `match` keeps room for future schema changes.
+    /// Upgrade an older config in place to [`CURRENT_CONFIG_VERSION`]; today this is just a version stamp since new fields use serde defaults.
     pub fn migrate(&mut self) {
         match self.version {
             v if v < 3 => self.version = CURRENT_CONFIG_VERSION,
@@ -316,8 +311,7 @@ pub fn load_or_create() -> Result<(AppConfig, PathBuf)> {
     Ok((config, path))
 }
 
-/// Best-effort read of just the `version` field of an on-disk config, used to
-/// decide whether a migration needs persisting. Returns 0 if it can't be read.
+/// Best-effort read of just the `version` field of an on-disk config; returns 0 if it can't be read.
 fn on_disk_version(path: &Path) -> u32 {
     #[derive(Deserialize)]
     struct VersionOnly {
