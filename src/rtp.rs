@@ -79,8 +79,7 @@ impl RtpPacketizer {
         for sample in samples {
             let clamped = sample.clamp(-1.0, 1.0);
             if self.bit_depth == 24 {
-                // 3-byte big-endian: scale to ±(2^23 - 1), drop the i32 MSB
-                // (always sign-extension thanks to the clamp above).
+                // 3-byte big-endian: scale to ±(2^23 - 1), drop sign-ext MSB.
                 let quantized = (clamped * I24_MAX).round() as i32;
                 let bytes = quantized.to_be_bytes();
                 packet.extend_from_slice(&bytes[1..4]);
@@ -132,8 +131,7 @@ mod tests {
         assert_eq!(packet[1], DYNAMIC_L24_PAYLOAD_TYPE);
         // Header (12) + 3 samples * 3 bytes.
         assert_eq!(packet.len(), 12 + 3 * 3);
-        // 1.0 -> +8388607 = 0x7FFFFF; 0.0 -> 0x000000;
-        // -1.0 -> -8388607 = 0x800001 in 24-bit two's complement.
+        // 24-bit two's complement: 1.0=0x7FFFFF, 0.0=0x000000, -1.0=0x800001.
         assert_eq!(&packet[12..15], &[0x7F, 0xFF, 0xFF]);
         assert_eq!(&packet[15..18], &[0x00, 0x00, 0x00]);
         assert_eq!(&packet[18..21], &[0x80, 0x00, 0x01]);

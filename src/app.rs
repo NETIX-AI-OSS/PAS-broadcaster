@@ -234,8 +234,7 @@ struct ProfileEditor {
     output_suffix: String,
     highpass_hz: String,
     lowpass_hz: String,
-    // Converter fields not surfaced in the editor (delay, volume, fades, map,
-    // format) are carried through unchanged from the profile being edited.
+    // Fields the editor omits (delay, volume, fades, map, format) pass through.
     converter_base: ConverterSettings,
 }
 
@@ -330,8 +329,7 @@ impl ProfileEditor {
             default_port: port,
         };
 
-        // The converter mirrors the profile's audio rate/channels and carries
-        // the unedited base settings for everything else.
+        // Converter mirrors profile audio rate/channels; rest is base settings.
         let converter = ConverterSettings {
             sample_rate: audio.sample_rate,
             channels: audio.channels,
@@ -2764,8 +2762,7 @@ impl PasBroadcaster {
 
         match self.profile_editor.mode {
             EditorMode::Existing(index) if index < self.config.profiles.len() => {
-                // In-place update; the id may have changed, so guard against
-                // colliding with a *different* existing profile.
+                // Guard against colliding with a different existing profile.
                 if self
                     .config
                     .profiles
@@ -2852,8 +2849,7 @@ impl PasBroadcaster {
                 return;
             }
         };
-        // Clone-then-commit: a validation failure in save_to_path never leaves
-        // config or disk half-updated.
+        // Clone-then-commit: a save_to_path failure never half-updates config.
         let mut next = self.config.clone();
         next.converter = settings;
         match config::save_to_path(&next, &self.config_path) {

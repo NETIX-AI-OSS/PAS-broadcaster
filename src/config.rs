@@ -297,8 +297,7 @@ pub fn load_or_create() -> Result<(AppConfig, PathBuf)> {
 
     if path.exists() {
         let config = load_from_path(&path)?;
-        // `load_from_path` migrates in memory; if the on-disk file predates the
-        // current schema, persist the upgrade so it sticks.
+        // Persist the in-memory migration so disk matches current schema.
         if on_disk_version(&path) < CURRENT_CONFIG_VERSION {
             save_to_path(&config, &path)?;
         }
