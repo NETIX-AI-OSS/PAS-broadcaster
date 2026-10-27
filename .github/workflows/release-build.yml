@@ -99,6 +99,7 @@ jobs:
         with:
           name: ${{ matrix.artifact-name }}
           path: dist/*.zip
+          retention-days: 3
           if-no-files-found: error
 
   publish:
