@@ -10,7 +10,7 @@ cpal = "0.15"
 crossbeam-channel = "0.5"
 dark-light = "2.0"
 directories = "5.0"
-ffmpeg-sidecar = "2.5.2"
+ffmpeg-sidecar = "2.7.0"
 get_if_addrs = "0.5"
 iced = { version = "0.14", features = ["tokio", "image"] }
 rand = "0.8"
