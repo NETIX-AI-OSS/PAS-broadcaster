@@ -263,7 +263,7 @@ mod tests {
         assert_eq!(expected_packets(320, spp), 1);
         assert_eq!(expected_packets(640, spp), 2);
 
-        // Non-exact — last chunk is smaller than a full packet.
+        // Non-exact, last chunk is smaller than a full packet.
         assert_eq!(expected_packets(321, spp), 2);
         assert_eq!(expected_packets(319, spp), 1);
 

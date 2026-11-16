@@ -30,7 +30,7 @@ expects, so the hardware "just works".
 
 - Built-in profiles ship in `assets/device_profiles.toml` and are merged with
   your own profiles at every launch. The first built-in targets the **ATEIS
-  BOUTIQUE BTQ-VM4/VM8** (48 kHz / 24-bit, 50 Hz–18 kHz band-limited, L24).
+  BOUTIQUE BTQ-VM4/VM8** (48 kHz / 24-bit, 50 Hz-18 kHz band-limited, L24).
 - Built-in profiles are read-only; clone one to customize it. User profiles are
   saved to `config.toml`; built-ins are never persisted, so updates to the
   bundled asset reach you automatically unless you cloned that profile id.
