@@ -2574,7 +2574,7 @@ impl PasBroadcaster {
         let Some(index) = self.config.profiles.iter().position(|p| p.id == id) else {
             self.set_status_with_level(
                 LogLevel::Warning,
-                "Built-in profiles cannot be updated — use Save as new profile",
+                "Built-in profiles cannot be updated. Use Save as new profile.",
             );
             return;
         };
@@ -2622,7 +2622,7 @@ impl PasBroadcaster {
         self.pending_profile_id = Some(profile.id.clone());
 
         self.set_status(format!(
-            "Loaded profile '{}' ({} Hz / {}-bit, payload type {}) into editors — review and Save to apply",
+            "Loaded profile '{}' ({} Hz / {}-bit, payload type {}) into editors, review and Save to apply",
             profile.name,
             profile.audio.sample_rate,
             profile.audio.bit_depth,
@@ -2689,7 +2689,7 @@ impl PasBroadcaster {
         if profile.builtin {
             self.set_status_with_level(
                 LogLevel::Warning,
-                "Built-in profiles are read-only — use Clone to customize",
+                "Built-in profiles are read-only. Use Clone to customize.",
             );
             return;
         }
@@ -2768,7 +2768,7 @@ impl PasBroadcaster {
                     self.set_status_with_level(
                         LogLevel::Warning,
                         format!(
-                            "A profile with id '{}' already exists — choose a unique id",
+                            "A profile with id '{}' already exists. Choose a unique id.",
                             profile.id
                         ),
                     );
